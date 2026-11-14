@@ -1,0 +1,19 @@
+{
+  "name": "nesine-browser-runner",
+  "version": "2.0.0",
+  "private": true,
+  "description": "Unified Cloudflare Browser Rendering (@cloudflare/puppeteer) Worker for Spor Toto Nesine coupon automation.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "check": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@cloudflare/puppeteer": "^1.0.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20250214.0",
+    "typescript": "^5.7.3",
+    "wrangler": "^4.0.0"
+  }
+}
