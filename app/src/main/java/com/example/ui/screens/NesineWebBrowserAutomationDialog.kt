@@ -19,6 +19,7 @@ import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -32,6 +33,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -47,6 +49,8 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
@@ -185,12 +189,14 @@ fun NesineWebBrowserAutomationContent(
     coupon: Coupon,
     credentials: PlatformCredentials,
     onDismiss: () -> Unit,
+    onPlatformSelected: ((BettingPlatform) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var activePlatform by remember(credentials.platform) { mutableStateOf(credentials.platform) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var pageTitle by remember { mutableStateOf("nesine.com/sportoto") }
+    var pageTitle by remember(credentials.platform) { mutableStateOf(credentials.platform.webUrl) }
     var loadProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var activeColumnIdx by remember { mutableIntStateOf(0) }
@@ -199,8 +205,13 @@ fun NesineWebBrowserAutomationContent(
     var isHudExpanded by remember { mutableStateOf(true) }
     var webViewRecreationKey by remember { mutableIntStateOf(0) }
     var isNesineLoggedIn by remember { mutableStateOf<Boolean?>(null) }
-    var automationFeedback by remember {
-        mutableStateOf("Oturum kontrol ediliyor... Giriş yaptıktan sonra 'Tümünü Doldur' veya 'Tümünü Oyna' butonunu kullanın.")
+    var automationFeedback by remember(credentials.platform) {
+        mutableStateOf(
+            if (credentials.platform == BettingPlatform.NESINE)
+                "Nesine WebView hazır. Oturum açtıktan sonra 'Tümünü Doldur' veya 'Tümünü Oyna' kullanın."
+            else
+                "${credentials.platform.displayName} WebView açıldı. Kupon kolonlarını kopyalayıp oynayabilirsiniz."
+        )
     }
 
     val columns = coupon.columns
@@ -642,7 +653,7 @@ fun NesineWebBrowserAutomationContent(
                                 horizontalArrangement = Arrangement.spacedBy(6.dp)
                             ) {
                                 Text(
-                                    text = "Nesine Robotu",
+                                    text = if (activePlatform == BettingPlatform.NESINE) "Nesine Robotu" else "${activePlatform.shortName} WebView",
                                     color = CasinoGold,
                                     fontWeight = FontWeight.Black,
                                     fontSize = 13.sp,
@@ -732,6 +743,54 @@ fun NesineWebBrowserAutomationContent(
                     }
                 }
 
+                // Quick Platform Switcher Bar inside WebView
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(DarkBackground)
+                        .horizontalScroll(rememberScrollState())
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BettingPlatform.values().forEach { platform ->
+                        val selected = activePlatform == platform
+                        FilterChip(
+                            selected = selected,
+                            onClick = {
+                                isFillAllRunning = false
+                                isPlayAllRunning = false
+                                activePlatform = platform
+                                pageTitle = platform.webUrl
+                                onPlatformSelected?.invoke(platform)
+                                webViewRef?.loadUrl(platform.webUrl)
+                                automationFeedback = if (platform == BettingPlatform.NESINE) {
+                                    "Nesine açıldı • 'Tümünü Doldur' / 'Tümünü Oyna' hazır."
+                                } else {
+                                    "${platform.displayName} açıldı • Kolonları kopyalayıp yatırabilirsiniz."
+                                }
+                            },
+                            label = {
+                                Text(
+                                    text = "${platform.iconEmoji} ${platform.shortName}",
+                                    fontSize = 10.5.sp,
+                                    fontWeight = if (selected) FontWeight.Black else FontWeight.SemiBold,
+                                    maxLines = 1
+                                )
+                            },
+                            colors = FilterChipDefaults.filterChipColors(
+                                containerColor = DarkCard,
+                                labelColor = TextSecondary,
+                                selectedContainerColor = Color(platform.brandColorHex),
+                                selectedLabelColor = Color(platform.textColorHex)
+                            ),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("webview_platform_${platform.id}")
+                        )
+                    }
+                }
+
                 // 2. Always-Visible Top Primary Coupon Action Bar (never hidden by nav bar or keyboard!)
                 Row(
                     modifier = Modifier
@@ -742,78 +801,140 @@ fun NesineWebBrowserAutomationContent(
                     horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Button(
-                        onClick = { isFillAllRunning = !isFillAllRunning },
-                        enabled = !isPlayAllRunning && columns.isNotEmpty(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isFillAllRunning) Color(0xFFDC2626) else CasinoGold
-                        ),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("btn_webview_fill_all")
-                    ) {
-                        Icon(
-                            imageVector = if (isFillAllRunning) Icons.Default.Close else Icons.Default.AutoAwesome,
-                            contentDescription = null,
-                            tint = if (isFillAllRunning) Color.White else Color.Black,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isFillAllRunning) {
-                                "Durdur (Doldur)"
-                            } else {
-                                "Tümünü Doldur (${columns.size})"
-                            },
-                            color = if (isFillAllRunning) Color.White else Color.Black,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Black,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
+                    if (activePlatform == BettingPlatform.NESINE) {
+                        Button(
+                            onClick = { isFillAllRunning = !isFillAllRunning },
+                            enabled = !isPlayAllRunning && columns.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isFillAllRunning) Color(0xFFDC2626) else CasinoGold
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_webview_fill_all")
+                        ) {
+                            Icon(
+                                imageVector = if (isFillAllRunning) Icons.Default.Close else Icons.Default.AutoAwesome,
+                                contentDescription = null,
+                                tint = if (isFillAllRunning) Color.White else Color.Black,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (isFillAllRunning) {
+                                    "Durdur (Doldur)"
+                                } else {
+                                    "Tümünü Doldur (${columns.size})"
+                                },
+                                color = if (isFillAllRunning) Color.White else Color.Black,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
 
-                    Button(
-                        onClick = { isPlayAllRunning = !isPlayAllRunning },
-                        enabled = !isFillAllRunning && columns.isNotEmpty(),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isPlayAllRunning) Color(0xFFDC2626) else ElectricGreen
-                        ),
-                        shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
-                        modifier = Modifier
-                            .weight(1f)
-                            .heightIn(min = 48.dp)
-                            .testTag("btn_webview_play_all")
-                    ) {
-                        Icon(
-                            imageVector = if (isPlayAllRunning) Icons.Default.Close else Icons.Default.PlayArrow,
-                            contentDescription = null,
-                            tint = if (isPlayAllRunning) Color.White else Color.Black,
-                            modifier = Modifier.size(16.dp)
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = if (isPlayAllRunning) {
-                                "Durdur (Oyna)"
-                            } else {
-                                "Tümünü Oyna (${columns.size})"
+                        Button(
+                            onClick = { isPlayAllRunning = !isPlayAllRunning },
+                            enabled = !isFillAllRunning && columns.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (isPlayAllRunning) Color(0xFFDC2626) else ElectricGreen
+                            ),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_webview_play_all")
+                        ) {
+                            Icon(
+                                imageVector = if (isPlayAllRunning) Icons.Default.Close else Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = if (isPlayAllRunning) Color.White else Color.Black,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = if (isPlayAllRunning) {
+                                    "Durdur (Oyna)"
+                                } else {
+                                    "Tümünü Oyna (${columns.size})"
+                                },
+                                color = if (isPlayAllRunning) Color.White else Color.Black,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        Button(
+                            onClick = {
+                                val formatted = PlatformAutomationManager.formatCouponForPlatform(
+                                    coupon,
+                                    activePlatform,
+                                    credentials
+                                )
+                                val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+                                cm?.setPrimaryClip(ClipData.newPlainText("${activePlatform.shortName} Spor Toto", formatted))
+                                automationFeedback = "✅ ${columns.size} kolon ${activePlatform.shortName} için panoya kopyalandı."
+                                Toast.makeText(context, "${activePlatform.shortName} kuponu kopyalandı", Toast.LENGTH_SHORT).show()
                             },
-                            color = if (isPlayAllRunning) Color.White else Color.Black,
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Black,
-                            maxLines = 1,
-                            softWrap = false,
-                            overflow = TextOverflow.Ellipsis
-                        )
+                            enabled = columns.isNotEmpty(),
+                            colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_webview_copy_platform_coupon")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.ContentCopy,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(16.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Kolonları Kopyala (${columns.size})",
+                                color = Color.Black,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+
+                        Button(
+                            onClick = { webViewRef?.loadUrl(activePlatform.webUrl) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(activePlatform.brandColorHex)),
+                            shape = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_webview_open_platform_home")
+                        ) {
+                            Text(
+                                text = "${activePlatform.iconEmoji} ${activePlatform.shortName} Spor Toto",
+                                color = Color(activePlatform.textColorHex),
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
                     }
                 }
 
-                if (isNesineLoggedIn == false) {
+                if (activePlatform == BettingPlatform.NESINE && isNesineLoggedIn == false) {
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -928,7 +1049,9 @@ fun NesineWebBrowserAutomationContent(
                                             view?.evaluateJavascript(NesineAutoPlayJsInjector.buildCookieBannerDismissScript(), null)
                                             view?.evaluateJavascript(fitPageScript, null)
                                             view?.requestLayout()
-                                            checkSessionNow(view)
+                                            if (activePlatform == BettingPlatform.NESINE) {
+                                                checkSessionNow(view)
+                                            }
                                         }
 
                                         override fun onRenderProcessGone(
@@ -948,7 +1071,7 @@ fun NesineWebBrowserAutomationContent(
                                             return true
                                         }
                                     }
-                                    loadUrl(BettingPlatform.NESINE.webUrl)
+                                    loadUrl(activePlatform.webUrl)
                                     webViewRef = this
                                 }
                             }
@@ -1040,11 +1163,11 @@ fun NesineWebBrowserAutomationContent(
                                     onClick = {
                                         val text = PlatformAutomationManager.formatCouponForPlatform(
                                             coupon,
-                                            BettingPlatform.NESINE,
+                                            activePlatform,
                                             credentials
                                         )
                                         val cm = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
-                                        cm?.setPrimaryClip(ClipData.newPlainText("Nesine Spor Toto", text))
+                                        cm?.setPrimaryClip(ClipData.newPlainText("${activePlatform.shortName} Spor Toto", text))
                                         Toast.makeText(context, "Kupon panoya kopyalandı", Toast.LENGTH_SHORT).show()
                                     },
                                     modifier = Modifier
@@ -1058,30 +1181,32 @@ fun NesineWebBrowserAutomationContent(
                                     )
                                 }
 
-                                OutlinedButton(
-                                    onClick = triggerNesineLogin,
-                                    enabled = !isFillAllRunning && !isPlayAllRunning,
-                                    shape = RoundedCornerShape(10.dp),
-                                    contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
-                                    modifier = Modifier
-                                        .heightIn(min = 48.dp)
-                                        .testTag("btn_webview_fill_login")
-                                ) {
-                                    Icon(
-                                        Icons.Default.Key,
-                                        contentDescription = null,
-                                        tint = ElectricCyan,
-                                        modifier = Modifier.size(16.dp)
-                                    )
-                                    Spacer(modifier = Modifier.width(4.dp))
-                                    Text(
-                                        text = "Giriş",
-                                        color = ElectricCyan,
-                                        fontSize = 11.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        maxLines = 1,
-                                        softWrap = false
-                                    )
+                                if (activePlatform == BettingPlatform.NESINE) {
+                                    OutlinedButton(
+                                        onClick = triggerNesineLogin,
+                                        enabled = !isFillAllRunning && !isPlayAllRunning,
+                                        shape = RoundedCornerShape(10.dp),
+                                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
+                                        modifier = Modifier
+                                            .heightIn(min = 48.dp)
+                                            .testTag("btn_webview_fill_login")
+                                    ) {
+                                        Icon(
+                                            Icons.Default.Key,
+                                            contentDescription = null,
+                                            tint = ElectricCyan,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(4.dp))
+                                        Text(
+                                            text = "Giriş",
+                                            color = ElectricCyan,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            maxLines = 1,
+                                            softWrap = false
+                                        )
+                                    }
                                 }
                             }
                         }

@@ -268,10 +268,18 @@ fun MainAppContent(
             }
         }
     }
-    LaunchedEffect(currentTab, showPool) {
-        val showLiveScores = currentTab == AppNavTab.RESULTS || showPool
+    LaunchedEffect(currentTab, showPool, activeLiveScoreSource) {
+        val showLiveScores = currentTab == AppNavTab.RESULTS ||
+            showPool ||
+            (activeLiveScoreSource == LiveScoreSource.ESPN &&
+                currentTab in listOf(AppNavTab.HOME, AppNavTab.ANALYSIS, AppNavTab.COUPONS))
         viewModel.setLivePolling(showLiveScores)
-        if (showLiveScores) viewModel.pollLiveScoresNow()
+        if (showLiveScores) {
+            viewModel.pollLiveScoresNow()
+            if (currentTab == AppNavTab.RESULTS && previousWeekReport == null) {
+                viewModel.loadPreviousWeekWithEspn(forceRefresh = false)
+            }
+        }
     }
     var showTxtDialog by remember { mutableStateOf(false) }
     var showExcelDialog by remember { mutableStateOf(false) }
@@ -352,6 +360,7 @@ fun MainAppContent(
                 AppNavTab.ANALYSIS -> {
                     MatchAnalysisScreen(
                         matches = matches,
+                        liveScores = liveScores,
                         onTogglePrediction = { matchId, outcome ->
                             viewModel.togglePrediction(matchId, outcome)
                         },
@@ -391,9 +400,9 @@ fun MainAppContent(
                         isLoadingPreviousWeek = isLoadingPreviousWeek,
                         previousWeekError = previousWeekError,
                         hasApiKey = hasApiFootballKey,
-                        requiresApiKey = activeLiveScoreSource == LiveScoreSource.API_FOOTBALL,
-                        providerLabel = activeLiveScoreSource.badgeLabel,
-                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) },
+                        requiresApiKey = false,
+                        providerLabel = "ESPN",
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekWithEspn(force) },
                         onNavigateToLiveTab = { currentTab = AppNavTab.RESULTS },
                         favoritedMatchNumbers = favoritedMatchNumbers,
                         onToggleFavorite = { viewModel.toggleFavoriteMatch(it) },
@@ -426,7 +435,7 @@ fun MainAppContent(
                         previousWeekReport = previousWeekReport,
                         isLoadingPreviousWeek = isLoadingPreviousWeek,
                         previousWeekError = previousWeekError,
-                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) }
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekWithEspn(force) }
                     )
                 }
 
@@ -650,6 +659,10 @@ fun MainAppContent(
                 coupon = targetCoupon,
                 credentials = targetCreds,
                 onDismiss = { webViewAutomationTarget = null },
+                onPlatformSelected = { platform ->
+                    val updatedCreds = targetCreds.copy(platform = platform)
+                    viewModel.saveNesineCredentials(updatedCreds)
+                },
                 modifier = Modifier.fillMaxSize()
             )
         }

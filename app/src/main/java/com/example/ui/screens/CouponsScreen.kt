@@ -348,13 +348,13 @@ fun CouponsScreen(
             ) {
                 Column(modifier = Modifier.padding(14.dp)) {
                     Text(
-                        text = "🌐 Nesine • Tarayıcı Otomasyon Robotu",
+                        text = "🌐 ${savedCredentials.platform.shortName} • WebView Tarayıcı Otomasyonu",
                         color = ElectricCyan,
                         fontWeight = FontWeight.Bold,
                         fontSize = 15.sp
                     )
                     Text(
-                        text = "Uygulama içi tarayıcıda Nesine'yi açıp tüm kolonları otomatik doldurun ve oynayın (SMS 2FA uyumlu).",
+                        text = "Seçili siteyi (${savedCredentials.platform.domain}) uygulama içi tarayıcıda açın, kolonları doldurun veya farklı siteye geçin.",
                         color = TextSecondary,
                         fontSize = 11.sp,
                         lineHeight = 16.sp
@@ -616,7 +616,7 @@ fun CouponsScreen(
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    // THE BIG "OYNA" ACTION BUTTON
+                    // THE BIG "OYNA" ACTION BUTTON -> Opens In-App WebView directly
                     Button(
                         onClick = {
                             if (noPlayableBulletin) {
@@ -627,8 +627,16 @@ fun CouponsScreen(
                             } else {
                                 val success = onDeductFeeAndPlay(activeCoupon)
                                 if (success) {
-                                    Toast.makeText(context, "%.2f ₺ kolon bedeli tahsil edildi. Şimdi site seçiniz.".format(activeCoupon.columnFeeTotalTL), Toast.LENGTH_SHORT).show()
-                                    showSiteSelectionDialog = true
+                                    Toast.makeText(
+                                        context,
+                                        "%.2f ₺ kolon bedeli tahsil edildi. ${savedCredentials.platform.shortName} WebView açılıyor...".format(activeCoupon.columnFeeTotalTL),
+                                        Toast.LENGTH_SHORT
+                                    ).show()
+                                    if (onOpenInAppBrowser != null) {
+                                        onOpenInAppBrowser(activeCoupon, savedCredentials)
+                                    } else {
+                                        showSiteSelectionDialog = true
+                                    }
                                 } else {
                                     Toast.makeText(context, INSUFFICIENT_BALANCE_ERROR, Toast.LENGTH_LONG).show()
                                 }
@@ -655,23 +663,41 @@ fun CouponsScreen(
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Text(
-                                text = if (canAfford) "OYNA ⚡ (%.2f ₺)".format(activeCoupon.columnFeeTotalTL) else "Bakiye Yetersiz • Bakiye Yükle 💰",
+                                text = if (canAfford) {
+                                    "${savedCredentials.platform.shortName}'de OYNA ⚡ (%.2f ₺)".format(activeCoupon.columnFeeTotalTL)
+                                } else {
+                                    "Bakiye Yetersiz • Bakiye Yükle 💰"
+                                },
                                 color = if (canAfford) Color.Black else CasinoGold,
                                 fontWeight = FontWeight.Black,
-                                fontSize = 14.sp
+                                fontSize = 14.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(6.dp))
+                    Spacer(modifier = Modifier.height(8.dp))
 
-                    Text(
-                        text = "Site seçimi (İddaa, Nesine, Bilyoner vb.) oyna onayından sonra yapılacaktır.",
-                        fontSize = 10.sp,
-                        color = TextMuted,
-                        textAlign = TextAlign.Center,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    androidx.compose.material3.OutlinedButton(
+                        onClick = { showSiteSelectionDialog = true },
+                        border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.7f)),
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .defaultMinSize(minHeight = 48.dp)
+                            .testTag("btn_choose_play_site")
+                    ) {
+                        Text(
+                            text = "🌐 Farklı Bahis Sitesi Seç • ${savedCredentials.platform.iconEmoji} ${savedCredentials.platform.shortName}",
+                            fontSize = 12.sp,
+                            color = ElectricCyan,
+                            textAlign = TextAlign.Center,
+                            fontWeight = FontWeight.Bold,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
                 }
             }
         }
@@ -866,19 +892,33 @@ fun CouponsScreen(
         }
     }
 
-    // SITE SELECTION MODAL (Appears AFTER clicking OYNA)
+    // SITE SELECTION MODAL (Persists chosen platform & opens inside in-app WebView)
     if (showSiteSelectionDialog) {
         SiteSelectionDialog(
             coupon = activeCoupon,
+            selectedPlatform = savedCredentials.platform,
             onDismiss = { showSiteSelectionDialog = false },
             onSelectPlatform = { platform ->
                 showSiteSelectionDialog = false
-                selectedPlatformForPlay = platform
+                val updatedCreds = savedCredentials.copy(platform = platform)
+                onSaveCredentials(updatedCreds)
+                if (noPlayableBulletin) {
+                    Toast.makeText(context, effectiveBulletinError, Toast.LENGTH_LONG).show()
+                } else if (onOpenInAppBrowser != null) {
+                    Toast.makeText(
+                        context,
+                        "${platform.displayName} WebView açılıyor...",
+                        Toast.LENGTH_SHORT
+                    ).show()
+                    onOpenInAppBrowser(activeCoupon, updatedCreds)
+                } else {
+                    selectedPlatformForPlay = platform
+                }
             }
         )
     }
 
-    // Automated Play Dialog for the chosen site
+    // Fallback Automated Play Dialog if no WebView callback is provided
     selectedPlatformForPlay?.let { platform ->
         PlatformAutoPlayDialog(
             coupon = activeCoupon,
@@ -907,11 +947,12 @@ fun CouponsScreen(
 }
 
 /**
- * Site Selection Dialog: Shown AFTER clicking Oyna and confirming the 0.20 TL/column fee.
+ * Site Selection Dialog: Allows picking any supported legal Turkish betting site to open in WebView.
  */
 @Composable
 private fun SiteSelectionDialog(
     coupon: Coupon,
+    selectedPlatform: BettingPlatform = BettingPlatform.NESINE,
     onDismiss: () -> Unit,
     onSelectPlatform: (BettingPlatform) -> Unit
 ) {
@@ -923,13 +964,13 @@ private fun SiteSelectionDialog(
         title = {
             Column {
                 Text(
-                    text = "Yasal Bahis Sitesini Seçin",
+                    text = "Farklı Bahis Sitesi Seçin",
                     fontWeight = FontWeight.Black,
                     fontSize = 16.sp,
                     color = TextPrimary
                 )
                 Text(
-                    text = "Kolon bedeli tahsil edildi (${coupon.totalColumns} Kolon). Kuponun oynanacağı platformu seçiniz:",
+                    text = "${coupon.totalColumns} Kolon • Seçilen platform doğrudan uygulama içi WebView içinde açılır:",
                     fontSize = 11.sp,
                     color = CasinoGoldLight
                 )
@@ -939,12 +980,17 @@ private fun SiteSelectionDialog(
             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 BettingPlatform.values().forEach { platform ->
                     val brandColor = Color(platform.brandColorHex)
+                    val isCurrent = platform == selectedPlatform
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
                             .clip(RoundedCornerShape(10.dp))
-                            .background(Color(0xFF0E1524))
-                            .border(1.dp, brandColor.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                            .background(if (isCurrent) brandColor.copy(alpha = 0.14f) else Color(0xFF0E1524))
+                            .border(
+                                if (isCurrent) 1.5.dp else 1.dp,
+                                if (isCurrent) brandColor else brandColor.copy(alpha = 0.55f),
+                                RoundedCornerShape(10.dp)
+                            )
                             .clickable { onSelectPlatform(platform) }
                             .padding(horizontal = 14.dp, vertical = 10.dp)
                             .testTag("select_site_${platform.id}")
@@ -959,7 +1005,7 @@ private fun SiteSelectionDialog(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column {
                                     Text(
-                                        text = platform.displayName,
+                                        text = if (isCurrent) "${platform.displayName} (Seçili)" else platform.displayName,
                                         fontWeight = FontWeight.Black,
                                         fontSize = 14.sp,
                                         color = TextPrimary
@@ -979,7 +1025,7 @@ private fun SiteSelectionDialog(
                                     .padding(horizontal = 8.dp, vertical = 4.dp)
                             ) {
                                 Text(
-                                    text = if (platform == BettingPlatform.NESINE) "Cloudflare ⚡" else "Oyna ⚡",
+                                    text = if (platform == BettingPlatform.NESINE) "WebView Robot ⚡" else "WebView Aç ⚡",
                                     color = brandColor,
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.Black

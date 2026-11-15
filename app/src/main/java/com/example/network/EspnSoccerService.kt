@@ -18,7 +18,8 @@ interface EspnSoccerService {
     @GET("apis/site/v2/sports/soccer/{league}/scoreboard")
     suspend fun getScoreboard(
         @Path("league") league: String,
-        @Query("dates") dates: String? = null
+        @Query("dates") dates: String? = null,
+        @Query("limit") limit: Int? = 100
     ): Response<EspnScoreboardResponse>
 }
 

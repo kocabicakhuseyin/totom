@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
@@ -27,11 +29,17 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -57,6 +65,98 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
+private enum class PastWeekCategoryFilter(val label: String) {
+    ALL("Tümü"),
+    NATIONS("🌍 Uluslar Ligi"),
+    SUPER_LIG("🇹🇷 Süper Lig"),
+    EUROPE("🇪🇺 Avrupa")
+}
+
+private fun PastBulletinMatchResult.isInternationalLeague(): Boolean =
+    league.contains("Uluslar", ignoreCase = true) ||
+        league.contains("Dünya Kupası", ignoreCase = true) ||
+        league.contains("Euro", ignoreCase = true) ||
+        league.contains("Avrupa Şampiyonası", ignoreCase = true) ||
+        league.contains("Hazırlık", ignoreCase = true) ||
+        league.contains("Nations", ignoreCase = true)
+
+private fun PastBulletinMatchResult.isSuperLigLeague(): Boolean =
+    league.contains("Süper Lig", ignoreCase = true) ||
+        league.contains("Türkiye Ligi", ignoreCase = true)
+
+private fun filterPastMatchesForCategory(
+    report: PreviousWeekBulletinReport,
+    filter: PastWeekCategoryFilter
+): List<PastBulletinMatchResult> {
+    val pool = report.allFinishedMatches.ifEmpty { report.matches }
+    return when (filter) {
+        PastWeekCategoryFilter.ALL -> report.matches
+        PastWeekCategoryFilter.NATIONS -> pool.filter { it.isInternationalLeague() }
+        PastWeekCategoryFilter.SUPER_LIG -> pool.filter { it.isSuperLigLeague() }
+        PastWeekCategoryFilter.EUROPE -> pool.filter { !it.isInternationalLeague() && !it.isSuperLigLeague() }
+    }
+}
+
+@Composable
+private fun PreviousWeekCategoryFilterBar(
+    report: PreviousWeekBulletinReport,
+    selectedFilter: PastWeekCategoryFilter,
+    onSelectFilter: (PastWeekCategoryFilter) -> Unit
+) {
+    val pool = report.allFinishedMatches.ifEmpty { report.matches }
+    val nationsCount = pool.count { it.isInternationalLeague() }
+    val superLigCount = pool.count { it.isSuperLigLeague() }
+    val europeCount = pool.count { !it.isInternationalLeague() && !it.isSuperLigLeague() }
+
+    val availableTabs = buildList {
+        add(PastWeekCategoryFilter.ALL to report.matches.size)
+        if (nationsCount > 0) add(PastWeekCategoryFilter.NATIONS to nationsCount)
+        if (superLigCount > 0) add(PastWeekCategoryFilter.SUPER_LIG to superLigCount)
+        if (europeCount > 0) add(PastWeekCategoryFilter.EUROPE to europeCount)
+    }
+
+    if (availableTabs.size <= 1) return
+
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .horizontalScroll(rememberScrollState()),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        availableTabs.forEach { (filter, count) ->
+            val selected = selectedFilter == filter
+            FilterChip(
+                selected = selected,
+                onClick = { onSelectFilter(filter) },
+                label = {
+                    Text(
+                        text = "${filter.label} ($count)",
+                        fontSize = 11.sp,
+                        fontWeight = if (selected) FontWeight.Black else FontWeight.SemiBold,
+                        maxLines = 1
+                    )
+                },
+                colors = FilterChipDefaults.filterChipColors(
+                    containerColor = DarkBackground,
+                    labelColor = TextSecondary,
+                    selectedContainerColor = CasinoGold,
+                    selectedLabelColor = Color.Black
+                ),
+                border = FilterChipDefaults.filterChipBorder(
+                    enabled = true,
+                    selected = selected,
+                    borderColor = DarkCardBorder,
+                    selectedBorderColor = CasinoGold
+                ),
+                modifier = Modifier
+                    .heightIn(min = 48.dp)
+                    .testTag("past_filter_chip_${filter.name.lowercase()}")
+            )
+        }
+    }
+}
+
 @Composable
 internal fun PreviousWeekResultsCard(
     report: PreviousWeekBulletinReport?,
@@ -68,7 +168,12 @@ internal fun PreviousWeekResultsCard(
     onLoadPreviousWeek: (forceRefresh: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val isProviderReady = !requiresApiKey || hasApiKey
+    var selectedFilter by remember(report) { mutableStateOf(PastWeekCategoryFilter.ALL) }
+    val displayedMatches = remember(report, selectedFilter) {
+        if (report == null) emptyList()
+        else filterPastMatchesForCategory(report, selectedFilter).ifEmpty { report.matches }
+    }
+
     Card(
         colors = CardDefaults.cardColors(containerColor = DarkCard),
         border = BorderStroke(1.dp, CasinoGold.copy(alpha = 0.45f)),
@@ -163,25 +268,26 @@ internal fun PreviousWeekResultsCard(
                     )
                 }
             } else if (report != null && report.matches.isNotEmpty()) {
-                PreviousWeekDistributionStrip(report.matches)
+                PreviousWeekCategoryFilterBar(
+                    report = report,
+                    selectedFilter = selectedFilter,
+                    onSelectFilter = { selectedFilter = it }
+                )
+                PreviousWeekDistributionStrip(displayedMatches)
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    report.matches.forEach { item ->
+                    displayedMatches.forEach { item ->
                         PastBulletinMatchRow(item = item)
                     }
                 }
             } else {
                 Text(
-                    text = errorMessage ?: if (isProviderReady) {
-                        "Geçen haftanın Spor Toto bülten maçlarını ve kesinleşmiş maç sonuçlarını $providerLabel üzerinden çekebilirsiniz."
-                    } else {
-                        "Geçen haftanın bültenini ve gerçek maç sonuçlarını görmek için yukarıdaki alana API-Football anahtarınızı girin."
-                    },
+                    text = errorMessage ?: "Geçen haftanın Spor Toto bülten maçlarını ve kesinleşmiş maç sonuçlarını ESPN üzerinden anahtarsız çekebilirsiniz.",
                     color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 17.sp
                 )
                 Button(
-                    onClick = { onLoadPreviousWeek(false) },
+                    onClick = { onLoadPreviousWeek(true) },
                     enabled = !isLoading,
                     colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
                     shape = RoundedCornerShape(10.dp),
@@ -191,7 +297,7 @@ internal fun PreviousWeekResultsCard(
                         .testTag("btn_load_previous_week")
                 ) {
                     Text(
-                        text = "📅 Geçen Haftanın Bültenini & Sonuçlarını Göster",
+                        text = "🌐 Geçen Haftanın Sonuçlarını ESPN ile Çek",
                         color = Color.Black,
                         fontWeight = FontWeight.Black,
                         fontSize = 12.sp
@@ -214,7 +320,12 @@ internal fun PreviousWeekBulletinDialog(
     onNavigateToLiveTab: () -> Unit,
     onDismiss: () -> Unit
 ) {
-    val isProviderReady = !requiresApiKey || hasApiKey
+    var selectedFilter by remember(report) { mutableStateOf(PastWeekCategoryFilter.ALL) }
+    val displayedMatches = remember(report, selectedFilter) {
+        if (report == null) emptyList()
+        else filterPastMatchesForCategory(report, selectedFilter).ifEmpty { report.matches }
+    }
+
     AlertDialog(
         onDismissRequest = onDismiss,
         containerColor = DarkCard,
@@ -282,14 +393,22 @@ internal fun PreviousWeekBulletinDialog(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    PreviousWeekDistributionStrip(report.matches)
+                    PreviousWeekCategoryFilterBar(
+                        report = report,
+                        selectedFilter = selectedFilter,
+                        onSelectFilter = { selectedFilter = it }
+                    )
+                    PreviousWeekDistributionStrip(displayedMatches)
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 360.dp),
                         verticalArrangement = Arrangement.spacedBy(6.dp)
                     ) {
-                        items(report.matches, key = { it.matchNumber }) { item ->
+                        items(
+                            items = displayedMatches,
+                            key = { "${it.matchNumber}_${it.homeTeam}_${it.awayTeam}" }
+                        ) { item ->
                             PastBulletinMatchRow(item = item)
                         }
                     }
@@ -300,52 +419,28 @@ internal fun PreviousWeekBulletinDialog(
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = errorMessage ?: if (isProviderReady) {
-                            "Geçen haftanın sonuçlarını yüklemek için Yenile butonuna dokunun."
-                        } else {
-                            "Geçen haftanın bültenini ve gerçek maç sonuçlarını API-Football üzerinden çekmek için Canlı sekmesinden ücretsiz API anahtarınızı girin."
-                        },
+                        text = errorMessage
+                            ?: "Geçen haftanın maç sonuçlarını ESPN üzerinden anahtarsız çekmek için Yenile butonuna dokunun.",
                         color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
                     )
-                    if (!isProviderReady) {
-                        Button(
-                            onClick = {
-                                onDismiss()
-                                onNavigateToLiveTab()
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = ElectricCyan),
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .heightIn(min = 48.dp)
-                        ) {
-                            Text(
-                                text = "Canlı Sekmesinde Sağlayıcı Ayarla",
-                                color = Color.Black,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
                 }
             }
         },
         confirmButton = {
-            if (isProviderReady) {
-                Button(
-                    onClick = onRefresh,
-                    enabled = !isLoading,
-                    colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
-                    modifier = Modifier.heightIn(min = 48.dp)
-                ) {
-                    Text(
-                        text = if (isLoading) "Çekiliyor..." else "↻ Yenile",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 12.sp
-                    )
-                }
+            Button(
+                onClick = onRefresh,
+                enabled = !isLoading,
+                colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Text(
+                    text = if (isLoading) "Çekiliyor..." else "↻ ESPN'den Yenile",
+                    color = Color.Black,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 12.sp
+                )
             }
         },
         dismissButton = {

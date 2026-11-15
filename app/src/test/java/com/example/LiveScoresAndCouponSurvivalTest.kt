@@ -602,7 +602,8 @@ class LiveScoresAndCouponSurvivalTest {
         val espnFake = object : com.example.network.EspnSoccerService {
             override suspend fun getScoreboard(
                 league: String,
-                dates: String?
+                dates: String?,
+                limit: Int?
             ): Response<com.example.network.EspnScoreboardResponse> {
                 queriedLeagues.add(league)
                 val events = if (league == "tur.1") {
@@ -684,5 +685,277 @@ class LiveScoresAndCouponSurvivalTest {
         assertEquals("GALATASARAY", prev.matches[0].homeTeam)
         assertEquals(PredictionOutcome.HOME, prev.matches[0].winningOutcome)
         assertTrue(prev.sourceLabel.contains("ESPN"))
+    }
+
+    @Test
+    fun previousWeekFromEspnFallsBackToLatestScoreboardWhenDatedWindowIsEmpty() = runBlocking {
+        val queriedParams = mutableListOf<Pair<String, String?>>()
+        val espnFake = object : com.example.network.EspnSoccerService {
+            override suspend fun getScoreboard(
+                league: String,
+                dates: String?,
+                limit: Int?
+            ): Response<com.example.network.EspnScoreboardResponse> {
+                queriedParams.add(league to dates)
+                val events = if (dates == null && league == "tur.1") {
+                    listOf(
+                        com.example.network.EspnEvent(
+                            id = "9001",
+                            date = "2026-11-08T16:00Z",
+                            competitions = listOf(
+                                com.example.network.EspnCompetition(
+                                    id = "9001",
+                                    date = "2026-11-08T16:00Z",
+                                    competitors = listOf(
+                                        com.example.network.EspnCompetitor(
+                                            homeAway = "home",
+                                            score = "1",
+                                            team = com.example.network.EspnTeam(displayName = "Besiktas")
+                                        ),
+                                        com.example.network.EspnCompetitor(
+                                            homeAway = "away",
+                                            score = "1",
+                                            team = com.example.network.EspnTeam(displayName = "Trabzonspor")
+                                        )
+                                    ),
+                                    status = com.example.network.EspnEventStatus(
+                                        displayClock = "90'",
+                                        type = com.example.network.EspnStatusType(
+                                            name = "STATUS_FULL_TIME",
+                                            state = "post",
+                                            completed = true
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                } else {
+                    emptyList()
+                }
+                return Response.success(
+                    com.example.network.EspnScoreboardResponse(
+                        leagues = listOf(com.example.network.EspnLeagueInfo(name = "Turkish Super Lig", slug = league)),
+                        events = events
+                    )
+                )
+            }
+        }
+
+        // Even if active source was API_FOOTBALL with empty key, fetchPreviousWeekFromEspn works keylessly.
+        val repo = SporTotoBulletinRepositoryImpl(
+            liveScoreApiKey = "",
+            espnService = espnFake,
+            initialSource = com.example.repository.LiveScoreSource.API_FOOTBALL
+        )
+
+        val report = repo.fetchPreviousWeekFromEspn(forceRefresh = true).getOrThrow()
+        assertEquals(1, report.matches.size)
+        assertEquals("BESIKTAS", report.matches[0].homeTeam)
+        assertEquals("TRABZONSPOR", report.matches[0].awayTeam)
+        assertEquals("1 - 1", report.matches[0].scoreDisplay)
+        assertEquals(PredictionOutcome.DRAW, report.matches[0].winningOutcome)
+        assertEquals("ESPN • Doğrulanmış Sonuçlar", report.sourceLabel)
+        assertTrue(queriedParams.any { it.second != null })
+        assertTrue(queriedParams.any { it.second == null })
+    }
+
+    @Test
+    fun previousWeekPrioritizesUefaNationsLeagueWhenRecentInternationalWeekExists() = runBlocking {
+        fun finishedEvent(id: String, date: String, home: String, away: String, hs: String, asScore: String) =
+            com.example.network.EspnEvent(
+                id = id,
+                date = date,
+                competitions = listOf(
+                    com.example.network.EspnCompetition(
+                        id = id,
+                        date = date,
+                        competitors = listOf(
+                            com.example.network.EspnCompetitor(
+                                homeAway = "home",
+                                score = hs,
+                                team = com.example.network.EspnTeam(displayName = home)
+                            ),
+                            com.example.network.EspnCompetitor(
+                                homeAway = "away",
+                                score = asScore,
+                                team = com.example.network.EspnTeam(displayName = away)
+                            )
+                        ),
+                        status = com.example.network.EspnEventStatus(
+                            displayClock = "90'",
+                            type = com.example.network.EspnStatusType(
+                                name = "STATUS_FULL_TIME",
+                                state = "post",
+                                completed = true
+                            )
+                        )
+                    )
+                )
+            )
+
+        val espnFake = object : com.example.network.EspnSoccerService {
+            override suspend fun getScoreboard(
+                league: String,
+                dates: String?,
+                limit: Int?
+            ): Response<com.example.network.EspnScoreboardResponse> {
+                assertEquals(100, limit)
+                val events = if (dates != null) {
+                    when (league) {
+                        "uefa.nations" -> listOf(
+                            finishedEvent("101", "2026-11-12T19:45Z", "France", "Israel", "0", "0"),
+                            finishedEvent("102", "2026-11-13T19:45Z", "Belgium", "Italy", "0", "1"),
+                            finishedEvent("103", "2026-11-14T17:00Z", "Turkey", "Wales", "2", "1"),
+                            finishedEvent("104", "2026-11-14T19:45Z", "Germany", "Bosnia", "7", "0"),
+                            finishedEvent("105", "2026-11-14T19:45Z", "Netherlands", "Hungary", "4", "0"),
+                            finishedEvent("106", "2026-11-14T19:45Z", "Portugal", "Poland", "5", "1")
+                        )
+                        "tur.1" -> listOf(
+                            finishedEvent("201", "2026-11-10T16:00Z", "Galatasaray", "Samsunspor", "3", "2"),
+                            finishedEvent("202", "2026-11-10T16:00Z", "Fenerbahce", "Sivasspor", "4", "0")
+                        )
+                        else -> emptyList()
+                    }
+                } else {
+                    emptyList()
+                }
+                return Response.success(
+                    com.example.network.EspnScoreboardResponse(
+                        leagues = listOf(com.example.network.EspnLeagueInfo(name = league, slug = league)),
+                        events = events
+                    )
+                )
+            }
+        }
+
+        val repo = SporTotoBulletinRepositoryImpl(
+            liveScoreApiKey = "",
+            espnService = espnFake,
+            initialSource = com.example.repository.LiveScoreSource.ESPN
+        )
+
+        val report = repo.fetchPreviousWeekFromEspn(forceRefresh = true).getOrThrow()
+        assertTrue(report.weekLabel.contains("Uluslar Ligi"))
+        assertTrue(report.matches.any { it.league == "UEFA Uluslar Ligi" })
+        assertTrue(report.matches.any { it.homeTeam == "TURKEY" && it.scoreDisplay == "2 - 1" })
+        assertTrue(report.allFinishedMatches.any { it.league == "UEFA Uluslar Ligi" })
+        assertTrue(report.allFinishedMatches.any { it.league == "Trendyol Süper Lig" })
+    }
+
+    @Test
+    fun espnFetchesMatchesFirstAndUpdatesScoresAsPlayed() = runBlocking {
+        var matchStarted = false
+        fun espnFixture(
+            id: String,
+            date: String,
+            home: String,
+            away: String,
+            state: String,
+            statusName: String,
+            completed: Boolean,
+            hs: String?,
+            asScore: String?,
+            clock: String = ""
+        ) = com.example.network.EspnEvent(
+            id = id,
+            date = date,
+            name = "$home vs $away",
+            competitions = listOf(
+                com.example.network.EspnCompetition(
+                    id = id,
+                    date = date,
+                    competitors = listOf(
+                        com.example.network.EspnCompetitor(
+                            homeAway = "home",
+                            score = hs,
+                            team = com.example.network.EspnTeam(displayName = home)
+                        ),
+                        com.example.network.EspnCompetitor(
+                            homeAway = "away",
+                            score = asScore,
+                            team = com.example.network.EspnTeam(displayName = away)
+                        )
+                    ),
+                    status = com.example.network.EspnEventStatus(
+                        displayClock = clock,
+                        type = com.example.network.EspnStatusType(
+                            name = statusName,
+                            state = state,
+                            completed = completed
+                        )
+                    )
+                )
+            )
+        )
+
+        val espnFake = object : com.example.network.EspnSoccerService {
+            override suspend fun getScoreboard(
+                league: String,
+                dates: String?,
+                limit: Int?
+            ): Response<com.example.network.EspnScoreboardResponse> {
+                val events = if (league == "tur.1") {
+                    listOf(
+                        if (!matchStarted) {
+                            espnFixture(
+                                "301",
+                                "2026-11-15T16:00Z",
+                                "Galatasaray",
+                                "Fenerbahce",
+                                "pre",
+                                "STATUS_SCHEDULED",
+                                false,
+                                null,
+                                null
+                            )
+                        } else {
+                            espnFixture(
+                                "301",
+                                "2026-11-15T16:00Z",
+                                "Galatasaray",
+                                "Fenerbahce",
+                                "in",
+                                "STATUS_IN_PROGRESS",
+                                false,
+                                "2",
+                                "1",
+                                "68'"
+                            )
+                        }
+                    )
+                } else {
+                    emptyList()
+                }
+                return Response.success(
+                    com.example.network.EspnScoreboardResponse(
+                        leagues = listOf(com.example.network.EspnLeagueInfo(name = league, slug = league)),
+                        events = events
+                    )
+                )
+            }
+        }
+
+        val repo = SporTotoBulletinRepositoryImpl(
+            liveScoreApiKey = "",
+            espnService = espnFake,
+            initialSource = com.example.repository.LiveScoreSource.ESPN
+        )
+
+        // Step 1: Fetch matches first (before kickoff -> 15 matches loaded, 0 live scores yet)
+        val bulletin = repo.syncTurkishLeagueBulletinFromApi().getOrThrow()
+        assertEquals(15, bulletin.matches.size)
+        assertEquals("GALATASARAY", bulletin.matches.first().homeTeam)
+        assertEquals(0, repo.liveScores.value.size)
+
+        // Step 2: Match starts playing -> reset source cooldown simulation & poll shows live score
+        matchStarted = true
+        repo.setLiveScoreSource(com.example.repository.LiveScoreSource.API_FOOTBALL)
+        repo.setLiveScoreSource(com.example.repository.LiveScoreSource.ESPN)
+        val liveScores = repo.pollLiveScores().getOrThrow()
+        assertEquals(1, liveScores.size)
+        assertEquals(MatchStatus.LIVE, liveScores[0].status)
+        assertEquals("2 - 1", liveScores[0].scoreDisplay)
+        assertEquals("68'", liveScores[0].minuteText)
     }
 }

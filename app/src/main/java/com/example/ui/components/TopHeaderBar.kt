@@ -54,8 +54,12 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 
+import androidx.compose.foundation.Image
 import androidx.compose.material.icons.automirrored.filled.ReceiptLong
 import androidx.compose.material.icons.filled.SportsScore
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
+import com.example.R
 import com.example.ui.theme.VibrantRed
 
 enum class AppNavTab(val label: String, val icon: ImageVector) {
@@ -99,24 +103,15 @@ fun TopHeaderBar(
                     verticalAlignment = Alignment.CenterVertically,
                     modifier = Modifier.clickable { onProfileClick() }
                 ) {
-                    Box(
+                    Image(
+                        painter = painterResource(id = R.drawable.app_logo_emblem),
+                        contentDescription = "Spor Toto Uygulama Simgesi",
+                        contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .size(34.dp)
-                            .clip(RoundedCornerShape(8.dp))
-                            .background(
-                                Brush.linearGradient(
-                                    listOf(CasinoGold, Color(0xFFD97706))
-                                )
-                            ),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Text(
-                            text = "ST",
-                            color = Color.Black,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 15.sp
-                        )
-                    }
+                            .size(36.dp)
+                            .clip(RoundedCornerShape(10.dp))
+                            .border(1.dp, CasinoGold.copy(alpha = 0.7f), RoundedCornerShape(10.dp))
+                    )
 
                     Spacer(modifier = Modifier.width(8.dp))
 

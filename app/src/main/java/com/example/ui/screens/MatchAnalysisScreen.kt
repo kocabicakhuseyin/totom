@@ -61,7 +61,10 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.model.CouponPoolEvaluator
 import com.example.model.FilterProfileType
+import com.example.model.MatchLiveScore
+import com.example.model.MatchStatus
 import com.example.model.PredictionOutcome
 import com.example.model.TotoMatch
 import com.example.ui.components.TotoSelectionMatrixView
@@ -88,6 +91,7 @@ import com.example.network.model.NO_NEW_BULLETIN_ERROR
 @Composable
 fun MatchAnalysisScreen(
     matches: List<TotoMatch>,
+    liveScores: List<MatchLiveScore> = emptyList(),
     onTogglePrediction: (Int, PredictionOutcome) -> Unit,
     onSelectAllFavorites: () -> Unit,
     onApplyQuickDoubles: () -> Unit,
@@ -122,6 +126,14 @@ fun MatchAnalysisScreen(
     val noPlayableBulletin = !hasPlayableBulletin || bulletinError != null || matches.size < 15
     var showAdvancedTools by remember { mutableStateOf(false) }
     var showPreviousWeekDialog by remember { mutableStateOf(false) }
+    val alignedLiveScores = remember(matches, liveScores) {
+        if (matches.isNotEmpty()) {
+            CouponPoolEvaluator.filterAndAlignToBulletin(matches, liveScores).associateBy { it.matchNumber }
+        } else {
+            emptyMap()
+        }
+    }
+    val liveOrFinishedCount = alignedLiveScores.size
 
     Column(
         modifier = modifier
@@ -352,10 +364,12 @@ fun MatchAnalysisScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
-                            text = "15 Maç Detaylı Oran & Tercih Listesi:",
+                            text = if (liveOrFinishedCount > 0)
+                                "15 Maç • Oynanan/Biten: $liveOrFinishedCount"
+                            else "15 Maç Detaylı Oran & Tercih Listesi:",
                             fontWeight = FontWeight.Bold,
                             fontSize = 13.sp,
-                            color = TextSecondary
+                            color = if (liveOrFinishedCount > 0) ElectricGreen else TextSecondary
                         )
                         Text(
                             text = "$totalSelectedMatches / 15 Seçildi",
@@ -366,10 +380,11 @@ fun MatchAnalysisScreen(
                     }
                 }
 
-                // 3. 15 Match Cards with 1, 0, 2 options
+                // 3. 15 Match Cards with 1, 0, 2 options & live/played score
                 items(matches, key = { it.id }) { match ->
                     ModernMatchCard(
                         match = match,
+                        liveScore = alignedLiveScores[match.matchNumber],
                         isFavorited = favoritedMatchNumbers.contains(match.matchNumber),
                         onToggleFavorite = { onToggleFavorite(match.matchNumber) },
                         onToggleOutcome = { outcome -> onTogglePrediction(match.id, outcome) }
@@ -625,6 +640,7 @@ private fun BulletinDialogAction(
 @Composable
 private fun ModernMatchCard(
     match: TotoMatch,
+    liveScore: MatchLiveScore? = null,
     isFavorited: Boolean = false,
     onToggleFavorite: () -> Unit = {},
     onToggleOutcome: (PredictionOutcome) -> Unit
@@ -637,11 +653,16 @@ private fun ModernMatchCard(
         shape = RoundedCornerShape(14.dp),
         border = androidx.compose.foundation.BorderStroke(
             1.dp,
-            if (isFavorited) CasinoGold.copy(alpha = 0.65f) else DarkCardBorder
+            when {
+                liveScore?.isLive == true -> VibrantRed.copy(alpha = 0.75f)
+                liveScore?.status == MatchStatus.FINISHED -> ElectricGreen.copy(alpha = 0.6f)
+                isFavorited -> CasinoGold.copy(alpha = 0.65f)
+                else -> DarkCardBorder
+            }
         )
     ) {
         Column(modifier = Modifier.padding(12.dp)) {
-            // Header Row: Match Number, Date, Favorite Toggle, League
+            // Header Row: Match Number, Date, Favorite Toggle, League / Live Status
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -705,16 +726,29 @@ private fun ModernMatchCard(
                     }
                 }
 
+                val badgeColor = when (liveScore?.status) {
+                    MatchStatus.LIVE -> VibrantRed
+                    MatchStatus.HALF_TIME -> NeonAmber
+                    MatchStatus.FINISHED -> ElectricGreen
+                    else -> CasinoGold
+                }
+                val badgeText = when (liveScore?.status) {
+                    MatchStatus.LIVE -> "CANLI ${liveScore.minuteText}".trim()
+                    MatchStatus.HALF_TIME -> "İY"
+                    MatchStatus.FINISHED -> "MS (${liveScore.winningOutcome?.code ?: "-"})"
+                    else -> "Spor Toto"
+                }
+
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(4.dp))
-                        .background(Color(0xFF1E293B))
-                        .border(1.dp, CasinoGold.copy(alpha = 0.5f), RoundedCornerShape(4.dp))
+                        .background(if (liveScore != null) badgeColor.copy(alpha = 0.18f) else Color(0xFF1E293B))
+                        .border(1.dp, badgeColor.copy(alpha = 0.65f), RoundedCornerShape(4.dp))
                         .padding(horizontal = 6.dp, vertical = 2.dp)
                 ) {
                     Text(
-                        text = "Spor Toto",
-                        color = CasinoGold,
+                        text = badgeText,
+                        color = badgeColor,
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold
                     )
@@ -723,7 +757,7 @@ private fun ModernMatchCard(
 
             Spacer(modifier = Modifier.height(10.dp))
 
-            // Teams Row (Bold & Clean)
+            // Teams Row (Bold & Clean + Live Score Center Pill when playing/finished)
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -737,13 +771,36 @@ private fun ModernMatchCard(
                     modifier = Modifier.weight(1f)
                 )
 
-                Text(
-                    text = "VS",
-                    color = TextMuted,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 11.sp,
-                    modifier = Modifier.padding(horizontal = 8.dp)
-                )
+                if (liveScore != null) {
+                    Box(
+                        modifier = Modifier
+                            .padding(horizontal = 8.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurface)
+                            .border(
+                                1.dp,
+                                if (liveScore.isLive) VibrantRed else ElectricGreen,
+                                RoundedCornerShape(8.dp)
+                            )
+                            .padding(horizontal = 10.dp, vertical = 4.dp)
+                            .testTag("analysis_match_score_${match.matchNumber}")
+                    ) {
+                        Text(
+                            text = liveScore.scoreDisplay,
+                            color = if (liveScore.isLive) VibrantRed else ElectricGreen,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 15.sp
+                        )
+                    }
+                } else {
+                    Text(
+                        text = "VS",
+                        color = TextMuted,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 11.sp,
+                        modifier = Modifier.padding(horizontal = 8.dp)
+                    )
+                }
 
                 Text(
                     text = match.awayTeam,

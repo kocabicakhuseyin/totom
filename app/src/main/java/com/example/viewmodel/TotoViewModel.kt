@@ -156,6 +156,21 @@ class TotoViewModel(
         }
     }
 
+    fun loadPreviousWeekWithEspn(forceRefresh: Boolean = true) {
+        if (_isLoadingPreviousWeek.value) return
+        viewModelScope.launch {
+            _isLoadingPreviousWeek.value = true
+            _previousWeekError.value = null
+            val res = bulletinRepository.fetchPreviousWeekFromEspn(forceRefresh = forceRefresh)
+            res.onSuccess {
+                _previousWeekError.value = null
+            }.onFailure { err ->
+                _previousWeekError.value = err.message ?: "Geçen haftanın ESPN sonuçları alınamadı."
+            }
+            _isLoadingPreviousWeek.value = false
+        }
+    }
+
     private val _isLivePolling = MutableStateFlow(false)
     val isLivePolling: StateFlow<Boolean> = _isLivePolling.asStateFlow()
 
@@ -176,8 +191,8 @@ class TotoViewModel(
         refreshBulletin(forceRefresh = false)
         generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
 
-        // Free API-Football: poll only while the score page is visible.
-        // The repository also enforces an independent three-minute throttle.
+        // Poll live scores while the tracker or bulletin is visible (45s for keyless ESPN, 3m for API-Football).
+        // The repository also enforces an independent throttle.
         viewModelScope.launch {
             val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
             while (true) {
@@ -189,7 +204,8 @@ class TotoViewModel(
                     }.onFailure { _liveScoreError.value = it.message ?: "Canlı veri alınamadı." }
                     _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
                 }
-                delay(180_000L)
+                val intervalMs = if (activeLiveScoreSource.value == LiveScoreSource.ESPN) 45_000L else 180_000L
+                delay(intervalMs)
             }
         }
 
@@ -239,8 +255,15 @@ class TotoViewModel(
                         _hasPlayableBulletin.value = true
                         _bulletinError.value = null
                         syncStarterForumPostsWithBulletin(freshMatches)
+                        if (liveScores.value.isNotEmpty()) {
+                            _liveScoreError.value = null
+                            _lastLiveUpdateTime.value =
+                                SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                        } else if (!bulletinRepository.requiresApiKeyForActiveSource() || bulletinRepository.hasApiFootballKey()) {
+                            pollLiveScoresNow()
+                        }
                         if (forceRefresh) {
-                            _bulletinMessage.value = "Haftalık bülten ve canlı oranlar güncellendi!"
+                            _bulletinMessage.value = "Maçlar çekildi, canlı skorlar takip ediliyor!"
                         }
                     } else {
                         _matches.value = emptyList()

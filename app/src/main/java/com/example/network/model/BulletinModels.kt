@@ -144,5 +144,6 @@ data class PreviousWeekBulletinReport(
     val weekLabel: String,
     val dateRangeLabel: String,
     val sourceLabel: String,
-    val matches: List<PastBulletinMatchResult>
+    val matches: List<PastBulletinMatchResult>,
+    val allFinishedMatches: List<PastBulletinMatchResult> = matches
 )

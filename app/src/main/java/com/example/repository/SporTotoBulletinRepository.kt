@@ -116,6 +116,11 @@ interface SporTotoBulletinRepository {
     ): Result<PreviousWeekBulletinReport> =
         Result.failure(IllegalStateException("Desteklenmiyor"))
 
+    suspend fun fetchPreviousWeekFromEspn(
+        forceRefresh: Boolean = true
+    ): Result<PreviousWeekBulletinReport> =
+        fetchPreviousWeekBulletinAndResults(forceRefresh)
+
     companion object {
         val EMPTY_PREVIOUS_WEEK: StateFlow<PreviousWeekBulletinReport?> =
             MutableStateFlow<PreviousWeekBulletinReport?>(null).asStateFlow()
@@ -147,18 +152,20 @@ class SporTotoBulletinRepositoryImpl(
         /** Free mode checks scores at most every three minutes per device. */
         const val FREE_MIN_POLL_INTERVAL_MS = 3 * 60 * 1000L
         /** Keyless ESPN cooldown to avoid duplicate rapid-fire requests. */
-        const val ESPN_MIN_POLL_INTERVAL_MS = 60 * 1000L
+        const val ESPN_MIN_POLL_INTERVAL_MS = 20 * 1000L
         /** API-Football League IDs: Trendyol Süper Lig & TFF 1. Lig. */
         const val LEAGUE_TURKEY_SUPER_LIG = 203
         const val LEAGUE_TURKEY_FIRST_LIG = 204
         val DEFAULT_ESPN_LEAGUES = listOf(
             "tur.1",
+            "uefa.nations",
+            "fifa.worldq.uefa",
+            "uefa.euroq",
             "eng.1",
             "esp.1",
             "ger.1",
             "ita.1",
             "fra.1",
-            "uefa.nations",
             "uefa.champions"
         )
     }
@@ -690,18 +697,11 @@ class SporTotoBulletinRepositoryImpl(
                     }
                 }
 
-                if (_activeLiveScoreSource.value == LiveScoreSource.ESPN) {
+                if (_activeLiveScoreSource.value == LiveScoreSource.ESPN || configuredApiKey.isBlank()) {
                     return@withLock fetchPreviousWeekFromEspnLocked()
                 }
 
                 val key = configuredApiKey
-                if (key.isBlank()) {
-                    return@withLock Result.failure(
-                        IllegalStateException(
-                            "Geçen haftanın bültenini ve doğrulanmış skor sonuçlarını çekmek için Canlı sekmesinden API-Football anahtarınızı girin."
-                        )
-                    )
-                }
                 refreshDailyQuota()
                 if (usedToday >= FREE_DAILY_REQUEST_BUDGET || providerRemaining == 0) {
                     return@withLock Result.failure(
@@ -935,6 +935,11 @@ class SporTotoBulletinRepositoryImpl(
         "fra.1" -> "Fransa Ligue 1"
         "uefa.nations" -> "UEFA Uluslar Ligi"
         "uefa.champions" -> "UEFA Şampiyonlar Ligi"
+        "uefa.europa" -> "UEFA Avrupa Ligi"
+        "uefa.euroq" -> "UEFA Euro Elemeleri"
+        "uefa.euro" -> "UEFA Avrupa Şampiyonası"
+        "fifa.worldq.uefa" -> "Dünya Kupası Elemeleri"
+        "fifa.friendly" -> "Uluslararası Hazırlık"
         else -> fallbackName?.takeIf { it.isNotBlank() } ?: slug.uppercase(Locale.ROOT)
     }
 
@@ -970,7 +975,7 @@ class SporTotoBulletinRepositoryImpl(
                 espnLeagueSlugs.map { slug ->
                     async {
                         try {
-                            val response = espnService.getScoreboard(slug, datesParam)
+                            val response = espnService.getScoreboard(slug, datesParam, limit = 100)
                             if (response.isSuccessful && response.body() != null) {
                                 slug to response.body()!!
                             } else {
@@ -1032,16 +1037,29 @@ class SporTotoBulletinRepositoryImpl(
             val month = cal.get(java.util.Calendar.MONTH) + 1
             val season = if (month >= 7) year else year - 1
             val compactFmt = SimpleDateFormat("yyyyMMdd", Locale.US).apply { timeZone = istanbulTz }
-            val fromCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -2) }
-            val toCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, 9) }
+            val fromCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -1) }
+            val toCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, 10) }
             val datesRange = "${compactFmt.format(fromCal.time)}-${compactFmt.format(toCal.time)}"
 
-            val syncSlugs = listOf("tur.1", "ger.1", "fra.1", "eng.1", "esp.1", "ita.1", "uefa.nations")
-            val results = coroutineScope {
+            val internationalSyncSlugs = setOf("uefa.nations", "fifa.worldq.uefa", "uefa.euroq")
+            val syncSlugs = listOf(
+                "tur.1",
+                "uefa.nations",
+                "fifa.worldq.uefa",
+                "uefa.euroq",
+                "eng.1",
+                "esp.1",
+                "ger.1",
+                "ita.1",
+                "fra.1",
+                "uefa.champions",
+                "uefa.europa"
+            )
+            var results = coroutineScope {
                 syncSlugs.map { slug ->
                     async {
                         try {
-                            val response = espnService.getScoreboard(slug, datesRange)
+                            val response = espnService.getScoreboard(slug, datesRange, limit = 100)
                             if (response.isSuccessful && response.body() != null) {
                                 slug to response.body()!!
                             } else {
@@ -1056,34 +1074,106 @@ class SporTotoBulletinRepositoryImpl(
                 }.awaitAll()
             }.filterNotNull()
 
+            val totalDatedEvents = results.sumOf { it.second.events.size }
+            if (totalDatedEvents < 15) {
+                val fallbackLatest = coroutineScope {
+                    syncSlugs.map { slug ->
+                        async {
+                            try {
+                                val response = espnService.getScoreboard(slug, null, limit = 100)
+                                if (response.isSuccessful && response.body() != null) {
+                                    slug to response.body()!!
+                                } else {
+                                    null
+                                }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                null
+                            }
+                        }
+                    }.awaitAll()
+                }.filterNotNull()
+                if (fallbackLatest.isNotEmpty()) {
+                    results = (results + fallbackLatest)
+                        .groupBy { it.first }
+                        .map { (slug, entries) ->
+                            val info = entries.firstOrNull()?.second?.leagues.orEmpty()
+                            val mergedEvents = entries.flatMap { it.second.events }
+                                .distinctBy { ev -> ev.id.ifBlank { "${ev.name}|${ev.date}" } }
+                            slug to com.example.network.EspnScoreboardResponse(leagues = info, events = mergedEvents)
+                        }
+                }
+            }
+
             if (results.isEmpty()) {
                 return Result.failure(
                     IllegalStateException("ESPN Türkiye Ligi bağlantısı kurulamadı. İnterneti kontrol edin.")
                 )
             }
 
+            val statusPriorityComparator = compareBy<EspnEvent>(
+                { it.resolveStatus() == MatchStatus.FINISHED },
+                { it.date.orEmpty() }
+            )
+
             val superLigEvents = results.firstOrNull { it.first == "tur.1" }?.second?.events.orEmpty()
-                .sortedBy { it.date.orEmpty() }
-            val otherLeagueEvents = results.filter { it.first != "tur.1" }
+                .sortedWith(statusPriorityComparator)
+            val internationalEvents = results.filter { it.first in internationalSyncSlugs }
                 .flatMap { (slug, body) ->
                     val label = espnLeagueLabel(slug, body.leagues.firstOrNull()?.name)
                     body.events.map { it to label }
                 }
-                .sortedBy { it.first.date.orEmpty() }
+                .sortedWith(
+                    compareBy<Pair<EspnEvent, String>>(
+                        { it.first.resolveStatus() == MatchStatus.FINISHED },
+                        {
+                            val name = it.first.name.orEmpty()
+                            !(name.contains("Turkey", ignoreCase = true) ||
+                                name.contains("Türkiye", ignoreCase = true))
+                        },
+                        { it.first.date.orEmpty() }
+                    )
+                )
+            val europeClubEvents = results.filter { it.first != "tur.1" && it.first !in internationalSyncSlugs }
+                .flatMap { (slug, body) ->
+                    val label = espnLeagueLabel(slug, body.leagues.firstOrNull()?.name)
+                    body.events.map { it to label }
+                }
+                .sortedWith(
+                    compareBy<Pair<EspnEvent, String>>(
+                        { it.first.resolveStatus() == MatchStatus.FINISHED },
+                        { it.first.date.orEmpty() }
+                    )
+                )
+
+            val hasActiveSuperLig = superLigEvents.any { it.resolveStatus() != MatchStatus.FINISHED }
+            val hasActiveInternational = internationalEvents.any { it.first.resolveStatus() != MatchStatus.FINISHED }
 
             val pickedWithLeague = buildList<Pair<EspnEvent, String>> {
-                superLigEvents.take(10).forEach { add(it to "Trendyol Süper Lig") }
-                if (size < 15) {
-                    otherLeagueEvents
-                        .filter { (ev, _) -> none { it.first.id == ev.id && ev.id.isNotBlank() } }
-                        .take(15 - size)
-                        .forEach { add(it) }
-                }
-                if (size < 15) {
-                    superLigEvents
-                        .filter { ev -> none { it.first.id == ev.id && ev.id.isNotBlank() } }
-                        .take(15 - size)
-                        .forEach { add(it to "Trendyol Süper Lig") }
+                if (hasActiveSuperLig || !hasActiveInternational) {
+                    superLigEvents.take(10).forEach { add(it to "Trendyol Süper Lig") }
+                    if (size < 15) {
+                        (internationalEvents + europeClubEvents)
+                            .filter { (ev, _) -> none { it.first.id == ev.id && ev.id.isNotBlank() } }
+                            .take(15 - size)
+                            .forEach { add(it) }
+                    }
+                    if (size < 15) {
+                        superLigEvents
+                            .filter { ev -> none { it.first.id == ev.id && ev.id.isNotBlank() } }
+                            .take(15 - size)
+                            .forEach { add(it to "Trendyol Süper Lig") }
+                    }
+                } else {
+                    // International break: upcoming/live Nations League & qualifiers take priority
+                    internationalEvents.take(10).forEach { add(it) }
+                    if (size < 15) {
+                        (europeClubEvents + superLigEvents.map { it to "Trendyol Süper Lig" })
+                            .filter { (ev, _) -> none { it.first.id == ev.id && ev.id.isNotBlank() } }
+                            .take(15 - size)
+                            .forEach { add(it) }
+                    }
                 }
             }.sortedBy { it.first.date.orEmpty() }
 
@@ -1138,6 +1228,8 @@ class SporTotoBulletinRepositoryImpl(
             val aligned = CouponPoolEvaluator.filterAndAlignToBulletin(domainMatches, parsedScores)
             _liveScoreProvider.value = LiveScoreSource.ESPN.displayName
             _liveScores.value = aligned
+            lastEspnAttemptMs = now
+            lastSuccessfulEspnMs = now
 
             Result.success(bulletin)
         } catch (cancelled: CancellationException) {
@@ -1149,6 +1241,20 @@ class SporTotoBulletinRepositoryImpl(
         }
     }
 
+    override suspend fun fetchPreviousWeekFromEspn(
+        forceRefresh: Boolean
+    ): Result<PreviousWeekBulletinReport> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                if (!forceRefresh) {
+                    _previousWeekReport.value?.let { cached ->
+                        return@withLock Result.success(cached)
+                    }
+                }
+                fetchPreviousWeekFromEspnLocked()
+            }
+        }
+
     private suspend fun fetchPreviousWeekFromEspnLocked(): Result<PreviousWeekBulletinReport> {
         return try {
             val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
@@ -1156,69 +1262,165 @@ class SporTotoBulletinRepositoryImpl(
             val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
             val compactFmt = SimpleDateFormat("yyyyMMdd", Locale.US).apply { timeZone = istanbulTz }
             val displayDayFmt = SimpleDateFormat("yyyy-MM-dd", Locale.US).apply { timeZone = istanbulTz }
-            val fromCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -11) }
-            val toCal = (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -3) }
-            val datesRange = "${compactFmt.format(fromCal.time)}-${compactFmt.format(toCal.time)}"
-            val fromDate = displayDayFmt.format(fromCal.time)
-            val toDate = displayDayFmt.format(toCal.time)
 
-            val querySlugs = listOf("tur.1", "eng.1", "esp.1", "ger.1", "ita.1", "fra.1", "uefa.nations")
-            val results = coroutineScope {
-                querySlugs.map { slug ->
-                    async {
-                        try {
-                            val response = espnService.getScoreboard(slug, datesRange)
-                            if (response.isSuccessful && response.body() != null) {
-                                slug to response.body()!!
-                            } else {
+            fun offsetDateRange(fromDaysAgo: Int, toDaysAgo: Int): String {
+                val fromCal = (cal.clone() as java.util.Calendar).apply {
+                    add(java.util.Calendar.DAY_OF_MONTH, -fromDaysAgo)
+                }
+                val toCal = (cal.clone() as java.util.Calendar).apply {
+                    add(java.util.Calendar.DAY_OF_MONTH, -toDaysAgo)
+                }
+                return "${compactFmt.format(fromCal.time)}-${compactFmt.format(toCal.time)}"
+            }
+
+            val fromDate = displayDayFmt.format(
+                (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -12) }.time
+            )
+            val toDate = displayDayFmt.format(
+                (cal.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_MONTH, -1) }.time
+            )
+
+            val internationalSlugs = listOf(
+                "uefa.nations",
+                "fifa.worldq.uefa",
+                "uefa.euroq",
+                "uefa.euro",
+                "fifa.friendly"
+            )
+            val internationalSlugSet = internationalSlugs.toSet()
+            val querySlugs = internationalSlugs + listOf(
+                "tur.1",
+                "eng.1",
+                "esp.1",
+                "ger.1",
+                "ita.1",
+                "fra.1",
+                "uefa.champions",
+                "uefa.europa"
+            )
+
+            var anyHttpSuccess = false
+            suspend fun queryFinishedForRange(
+                datesParam: String?,
+                slugs: List<String> = querySlugs
+            ): List<Pair<String, MatchLiveScore>> {
+                val responses = coroutineScope {
+                    slugs.map { slug ->
+                        async {
+                            try {
+                                val response = espnService.getScoreboard(slug, datesParam, limit = 100)
+                                if (response.isSuccessful && response.body() != null) {
+                                    slug to response.body()!!
+                                } else {
+                                    null
+                                }
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
                                 null
                             }
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            null
                         }
-                    }
-                }.awaitAll()
-            }.filterNotNull()
+                    }.awaitAll()
+                }.filterNotNull()
 
-            if (results.isEmpty()) {
+                if (responses.isNotEmpty()) anyHttpSuccess = true
+
+                return responses.flatMap { (slug, body) ->
+                    val label = espnLeagueLabel(slug, body.leagues.firstOrNull()?.name)
+                    body.events
+                        .mapNotNull { it.toMatchLiveScore(label) }
+                        .filter {
+                            it.status == MatchStatus.FINISHED &&
+                                it.homeScore != null &&
+                                it.awayScore != null
+                        }
+                        .map { slug to it }
+                }
+            }
+
+            val collected = mutableListOf<Pair<String, MatchLiveScore>>()
+            // Pass 1: previous week including yesterday (-12d..-1d)
+            collected.addAll(queryFinishedForRange(offsetDateRange(12, 1)))
+
+            // Pass 2: wider 21-day window (-21d..-1d) if fewer than 5 finished matches found
+            if (collected.distinctBy { "${it.second.homeTeam}|${it.second.awayTeam}|${it.second.matchDate}" }.size < 5) {
+                collected.addAll(queryFinishedForRange(offsetDateRange(21, 1)))
+            }
+
+            // Pass 3: ESPN latest completed scoreboard (dates=null) when dated window had < 5 matches
+            // or when no international/Nations League matches were captured in the dated window.
+            val hasInternationalSoFar = collected.any { it.first in internationalSlugSet }
+            val distinctCountSoFar = collected
+                .distinctBy { "${it.second.homeTeam}|${it.second.awayTeam}|${it.second.matchDate}" }
+                .size
+            if (distinctCountSoFar < 5) {
+                collected.addAll(queryFinishedForRange(null))
+            } else if (!hasInternationalSoFar) {
+                collected.addAll(queryFinishedForRange(null, internationalSlugs))
+            }
+
+            if (!anyHttpSuccess) {
                 return Result.failure(
                     IllegalStateException("Geçen haftanın sonuçları için ESPN bağlantısı kurulamadı.")
                 )
             }
 
-            val finishedByLeague = results.map { (slug, body) ->
-                val label = espnLeagueLabel(slug, body.leagues.firstOrNull()?.name)
-                val finishedScores = body.events
-                    .mapNotNull { it.toMatchLiveScore(label) }
-                    .filter {
-                        it.status == MatchStatus.FINISHED &&
-                            it.homeScore != null &&
-                            it.awayScore != null
-                    }
-                    .sortedBy { it.matchDate }
-                slug to finishedScores
-            }
+            val deduplicated = collected
+                .distinctBy { "${it.second.homeTeam}|${it.second.awayTeam}|${it.second.matchDate}" }
 
-            val superLig = finishedByLeague.firstOrNull { it.first == "tur.1" }?.second.orEmpty()
-            val otherFinished = finishedByLeague.filter { it.first != "tur.1" }.flatMap { it.second }
+            val nations = deduplicated.filter { it.first in internationalSlugSet }.map { it.second }
+                .sortedWith(
+                    compareByDescending<MatchLiveScore> {
+                        it.homeTeam.contains("Turkey", ignoreCase = true) ||
+                            it.awayTeam.contains("Turkey", ignoreCase = true) ||
+                            it.homeTeam.contains("Türkiye", ignoreCase = true) ||
+                            it.awayTeam.contains("Türkiye", ignoreCase = true)
+                    }.thenByDescending { it.matchDate }
+                )
+            val superLig = deduplicated.filter { it.first == "tur.1" }.map { it.second }
+                .sortedByDescending { it.matchDate }
+            val otherClubs = deduplicated.filter { it.first !in internationalSlugSet && it.first != "tur.1" }
+                .map { it.second }
+                .sortedByDescending { it.matchDate }
+
+            val newestNationDate = nations.maxOfOrNull { it.matchDate }.orEmpty()
+            val newestClubDate = (superLig + otherClubs).maxOfOrNull { it.matchDate }.orEmpty()
+            val prioritizeNationsLeague = nations.isNotEmpty() &&
+                (superLig.isEmpty() || newestNationDate >= newestClubDate || nations.size >= 6)
 
             val picked = buildList {
-                addAll(superLig.take(10))
-                if (size < 15) {
-                    addAll(
-                        otherFinished
-                            .filter { m -> none { it.matchNumber == m.matchNumber } }
-                            .take(15 - size)
-                    )
-                }
-                if (size < 15) {
-                    addAll(
-                        superLig
-                            .filter { m -> none { it.matchNumber == m.matchNumber } }
-                            .take(15 - size)
-                    )
+                if (prioritizeNationsLeague) {
+                    addAll(nations.take(15))
+                    if (size < 15) {
+                        addAll(
+                            superLig
+                                .filter { m -> none { it.matchNumber == m.matchNumber } }
+                                .take(15 - size)
+                        )
+                    }
+                    if (size < 15) {
+                        addAll(
+                            otherClubs
+                                .filter { m -> none { it.matchNumber == m.matchNumber } }
+                                .take(15 - size)
+                        )
+                    }
+                } else {
+                    addAll(superLig.take(10))
+                    if (size < 15) {
+                        addAll(
+                            (nations + otherClubs)
+                                .filter { m -> none { it.matchNumber == m.matchNumber } }
+                                .take(15 - size)
+                        )
+                    }
+                    if (size < 15) {
+                        addAll(
+                            superLig
+                                .filter { m -> none { it.matchNumber == m.matchNumber } }
+                                .take(15 - size)
+                        )
+                    }
                 }
             }.distinctBy { "${it.homeTeam}|${it.awayTeam}|${it.matchDate}" }
                 .sortedBy { it.matchDate }
@@ -1232,30 +1434,44 @@ class SporTotoBulletinRepositoryImpl(
                 )
             }
 
-            val mapped = picked.mapIndexed { idx, score ->
-                PastBulletinMatchResult(
-                    matchNumber = idx + 1,
-                    homeTeam = score.homeTeam.uppercase(Locale.ROOT).trim(),
-                    awayTeam = score.awayTeam.uppercase(Locale.ROOT).trim(),
-                    matchDate = formatIsoDateForBulletin(score.matchDate, istanbulTz),
-                    league = score.league.ifBlank { "Türkiye Ligi" },
-                    homeScore = score.homeScore,
-                    awayScore = score.awayScore,
-                    status = MatchStatus.FINISHED,
-                    winningOutcome = score.winningOutcome
-                )
+            fun MatchLiveScore.toPastResult(idx: Int) = PastBulletinMatchResult(
+                matchNumber = idx + 1,
+                homeTeam = homeTeam.uppercase(Locale.ROOT).trim(),
+                awayTeam = awayTeam.uppercase(Locale.ROOT).trim(),
+                matchDate = formatIsoDateForBulletin(matchDate, istanbulTz),
+                league = league.ifBlank { "Türkiye Ligi" },
+                homeScore = homeScore,
+                awayScore = awayScore,
+                status = MatchStatus.FINISHED,
+                winningOutcome = winningOutcome
+            )
+
+            val mapped = picked.mapIndexed { idx, score -> score.toPastResult(idx) }
+            val pickedKeys = picked.map { "${it.homeTeam}|${it.awayTeam}|${it.matchDate}" }.toSet()
+            val extraScores = (nations + superLig + otherClubs)
+                .filter { "${it.homeTeam}|${it.awayTeam}|${it.matchDate}" !in pickedKeys }
+                .distinctBy { "${it.homeTeam}|${it.awayTeam}|${it.matchDate}" }
+                .take(30)
+            val allMapped = mapped + extraScores.mapIndexed { idx, score ->
+                score.toPastResult(mapped.size + idx)
             }
 
             val currentWeek = _cachedBulletin.value?.weekNumber ?: cal.get(java.util.Calendar.WEEK_OF_YEAR)
             val prevWeek = (currentWeek - 1).coerceAtLeast(1)
             val firstDay = mapped.firstOrNull()?.matchDate?.substringBefore(" ") ?: fromDate
             val lastDay = mapped.lastOrNull()?.matchDate?.substringBefore(" ") ?: toDate
+            val weekTitle = if (prioritizeNationsLeague && nations.size >= 4) {
+                "Geçen Hafta • Uluslar Ligi ($prevWeek. Hafta)"
+            } else {
+                "Geçen Hafta ($prevWeek. Hafta)"
+            }
             val report = PreviousWeekBulletinReport(
                 weekNumber = prevWeek,
-                weekLabel = "Geçen Hafta ($prevWeek. Hafta)",
+                weekLabel = weekTitle,
                 dateRangeLabel = "$firstDay - $lastDay",
                 sourceLabel = "ESPN • Doğrulanmış Sonuçlar",
-                matches = mapped
+                matches = mapped,
+                allFinishedMatches = allMapped
             )
             _previousWeekReport.value = report
             Result.success(report)
@@ -1316,6 +1532,19 @@ class SporTotoBulletinRepositoryImpl(
             try {
                 if (!forceRefresh && _cachedBulletin.value.isPlayable()) {
                     return@withContext Result.success(_cachedBulletin.value!!)
+                }
+
+                // When using the default built-in endpoint with keyless ESPN enabled,
+                // automatically pull real scheduled/active matches from ESPN first.
+                if (apiService === NetworkModule.apiService &&
+                    _activeLiveScoreSource.value == LiveScoreSource.ESPN
+                ) {
+                    val espnBulletin = pollMutex.withLock {
+                        syncTurkishLeagueBulletinFromEspnLocked()
+                    }
+                    if (espnBulletin.isSuccess && espnBulletin.getOrNull().isPlayable()) {
+                        return@withContext espnBulletin
+                    }
                 }
 
                 val response = apiService.getCurrentWeeklyBulletin()

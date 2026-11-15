@@ -400,26 +400,65 @@ fun MatchResultsScreen(
             item {
                 Card(
                     modifier = Modifier.fillMaxWidth().testTag("live_score_empty"),
-                    colors = CardDefaults.cardColors(containerColor = DarkCard)
+                    colors = CardDefaults.cardColors(containerColor = DarkCard),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, DarkCardBorder)
                 ) {
-                    Text(
-                        text = errorMessage ?: if (!isProviderReady)
-                            "Canlı ve biten bülten sonuçlarını görmek için yukarıdaki ücretsiz API-Football anahtarını girin veya ESPN'e geçin."
-                        else if (matches.isNotEmpty())
-                            "Bültendeki 15 maç için henüz başlayan veya biten doğrulanmış ${activeSource.badgeLabel} sonucu bulunamadı."
-                        else "Şu anda ${activeSource.badgeLabel} üzerinden doğrulanmış canlı karşılaşma bulunamadı.",
-                        modifier = Modifier.padding(20.dp),
-                        color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
-                        textAlign = TextAlign.Center,
-                        fontSize = 13.sp
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = errorMessage ?: if (!isProviderReady)
+                                "Canlı ve biten bülten sonuçlarını görmek için yukarıdaki ücretsiz API-Football anahtarını girin veya ESPN'e geçin."
+                            else if (matches.isNotEmpty())
+                                "${matches.size} bülten maçı çekildi. Maçlar oynandıkça canlı skorlar ve biten sonuçlar burada otomatik güncellenecek."
+                            else "Şu anda ${activeSource.badgeLabel} üzerinden doğrulanmış canlı karşılaşma bulunamadı.",
+                            color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
+                            textAlign = TextAlign.Center,
+                            fontSize = 12.5.sp
+                        )
+                        if (errorMessage == null && matches.isNotEmpty()) {
+                            matches.take(15).forEach { match ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(DarkSurface)
+                                        .border(1.dp, DarkCardBorder, RoundedCornerShape(8.dp))
+                                        .padding(horizontal = 10.dp, vertical = 7.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text(
+                                        text = "#${match.matchNumber.toString().padStart(2, '0')} ${match.homeTeam} - ${match.awayTeam}",
+                                        color = TextPrimary,
+                                        fontSize = 11.5.sp,
+                                        fontWeight = FontWeight.SemiBold,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                        modifier = Modifier.weight(1f)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = match.matchDate.ifBlank { "Bekleniyor" },
+                                        color = ElectricCyan,
+                                        fontSize = 10.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
                 }
             }
         } else {
             item {
                 Text(
                     text = if (matches.isNotEmpty())
-                        "${activeSource.badgeLabel} • Bülten Maçları (Canlı & Biten: ${displayedBulletinScores.size})"
+                        "${activeSource.badgeLabel} • Oynanan & Biten Maçlar (${displayedBulletinScores.size} / ${matches.size})"
                     else "${activeSource.badgeLabel} Doğrulanmış Skorlar (${displayedBulletinScores.size})",
                     color = TextSecondary,
                     fontSize = 11.5.sp,
