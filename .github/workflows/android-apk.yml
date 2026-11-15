@@ -22,9 +22,25 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Android SDK paketlerini kur
+        shell: bash
         run: |
-          command -v sdkmanager
-          sdkmanager --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "Android SDK: $SDK_ROOT"
+          if [ ! -d "$SDK_ROOT/cmdline-tools" ]; then
+            echo "::error::Android command-line tools bulunamadi: $SDK_ROOT/cmdline-tools"
+            exit 1
+          fi
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager bulunamadi. SDK klasorunu kontrol edin."
+            find "$SDK_ROOT" -maxdepth 3 -type d | head -80
+            exit 1
+          fi
+          echo "sdkmanager: $SDKMANAGER"
+          chmod +x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - name: Gradle 9.3.1 kur
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -61,9 +77,18 @@ jobs:
           distribution: temurin
           java-version: '21'
       - name: Android SDK paketlerini kur
+        shell: bash
         run: |
-          command -v sdkmanager
-          sdkmanager --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          set -euo pipefail
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager bulunamadi: $SDK_ROOT"
+            exit 1
+          fi
+          chmod +x "$SDKMANAGER"
+          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
+          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
