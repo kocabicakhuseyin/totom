@@ -1,6 +1,8 @@
 package com.example.network.model
 
 import com.example.model.MatchProbability
+import com.example.model.MatchStatus
+import com.example.model.PredictionOutcome
 import com.example.model.TotoMatch
 import com.squareup.moshi.Json
 import com.squareup.moshi.JsonClass
@@ -115,3 +117,32 @@ fun BulletinMatchDto.toDomainTotoMatch(): TotoMatch {
         )
     )
 }
+
+/**
+ * Verified finished match item from last week's Spor Toto bulletin window.
+ */
+data class PastBulletinMatchResult(
+    val matchNumber: Int,
+    val homeTeam: String,
+    val awayTeam: String,
+    val matchDate: String,
+    val league: String,
+    val homeScore: Int?,
+    val awayScore: Int?,
+    val status: MatchStatus,
+    val winningOutcome: PredictionOutcome?
+) {
+    val scoreDisplay: String
+        get() = if (homeScore != null && awayScore != null) "$homeScore - $awayScore" else "- : -"
+}
+
+/**
+ * Verified summary and match list for the previous Spor Toto week.
+ */
+data class PreviousWeekBulletinReport(
+    val weekNumber: Int,
+    val weekLabel: String,
+    val dateRangeLabel: String,
+    val sourceLabel: String,
+    val matches: List<PastBulletinMatchResult>
+)

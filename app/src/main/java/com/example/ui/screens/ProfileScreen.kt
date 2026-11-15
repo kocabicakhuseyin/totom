@@ -69,10 +69,17 @@ fun ProfileScreen(
     onUpdateUsername: (String) -> Unit,
     onSelectTeam: (SupportedTeam) -> Unit,
     onOpenWallet: () -> Unit = {},
+    memberSession: com.example.repository.MemberSessionState = com.example.repository.MemberSessionState(),
+    poolRepository: com.example.repository.PoolRepository? = null,
+    onOpenAuth: () -> Unit = {},
+    onRefreshMemberProfile: () -> Unit = {},
+    onSignOut: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
-    var editingName by remember(userProfile.username) { mutableStateOf(userProfile.username) }
+    val resolvedDisplayName = memberSession.displayName.takeIf { memberSession.isSignedIn && it.isNotBlank() }
+        ?: userProfile.username
+    var editingName by remember(resolvedDisplayName) { mutableStateOf(resolvedDisplayName) }
     var isEditing by remember { mutableStateOf(false) }
 
     Column(
@@ -83,6 +90,141 @@ fun ProfileScreen(
             .padding(14.dp),
         verticalArrangement = Arrangement.spacedBy(14.dp)
     ) {
+        // Supabase Membership Card (Google / Apple ID / Email)
+        if (memberSession.isSignedIn) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF0E2034)),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.2.dp, ElectricGreen.copy(alpha = 0.65f))
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Default.Security,
+                                contentDescription = "Doğrulanmış Üyelik",
+                                tint = ElectricGreen,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Supabase Üyelik Aktif",
+                                fontWeight = FontWeight.Black,
+                                fontSize = 14.sp,
+                                color = ElectricGreen
+                            )
+                        }
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(ElectricCyan.copy(alpha = 0.16f))
+                                .border(1.dp, ElectricCyan.copy(alpha = 0.6f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 8.dp, vertical = 3.dp)
+                        ) {
+                            Text(
+                                text = memberSession.providerDisplayLabel,
+                                color = ElectricCyan,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    if (memberSession.email.isNotBlank()) {
+                        Text(
+                            text = "E-posta: ${memberSession.email}",
+                            color = TextPrimary,
+                            fontSize = 12.5.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Üye ID: ${memberSession.userId.take(10)}...",
+                            color = TextMuted,
+                            fontSize = 11.sp
+                        )
+                        if (memberSession.createdAtText.isNotBlank()) {
+                            Text(
+                                text = "Kayıt: ${memberSession.createdAtText}",
+                                color = TextMuted,
+                                fontSize = 11.sp
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Button(
+                            onClick = onRefreshMemberProfile,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF1E293B)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_refresh_member_profile")
+                        ) {
+                            Text("Profili Senkronize Et", color = ElectricCyan, fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                        Button(
+                            onClick = onSignOut,
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF3F1D2B)),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .weight(1f)
+                                .testTag("btn_member_sign_out")
+                        ) {
+                            Text("Çıkış Yap", color = Color(0xFFFCA5A5), fontSize = 11.5.sp, fontWeight = FontWeight.Bold)
+                        }
+                    }
+                }
+            }
+        } else if (poolRepository != null) {
+            SupabaseAuthCard(
+                repository = poolRepository,
+                title = "Üye Girişi • Google / Apple ID",
+                subtitle = "Profilinizi, favori takımınızı ve canlı kupon havuzu paylaşımlarınızı Supabase hesabınızla eşitleyin."
+            )
+        } else {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkCard),
+                shape = RoundedCornerShape(16.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.5f))
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Misafir Modu", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                        Text("Google veya Apple ID ile üye girişi yapın.", color = TextMuted, fontSize = 11.sp)
+                    }
+                    Button(
+                        onClick = onOpenAuth,
+                        colors = ButtonDefaults.buttonColors(containerColor = CasinoGold, contentColor = Color.Black)
+                    ) {
+                        Text("Giriş Yap", fontWeight = FontWeight.Black, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
         // User Profile Hero Card
         Card(
             modifier = Modifier.fillMaxWidth(),

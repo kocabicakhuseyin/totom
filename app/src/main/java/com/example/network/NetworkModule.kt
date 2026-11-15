@@ -113,6 +113,28 @@ object NetworkModule {
             .create(ScoreCardsLiveService::class.java)
     }
 
+    // Keyless ESPN public soccer scoreboard endpoint; isolated from bulletin offline fallback.
+    val espnService: EspnSoccerService by lazy {
+        Retrofit.Builder()
+            .baseUrl("https://site.api.espn.com/")
+            .client(
+                OkHttpClient.Builder()
+                    .connectTimeout(10, TimeUnit.SECONDS)
+                    .readTimeout(15, TimeUnit.SECONDS)
+                    .addInterceptor { chain ->
+                        val request = chain.request().newBuilder()
+                            .header("User-Agent", "Mozilla/5.0 (Android 14; Mobile) SporToto/1.0")
+                            .header("Accept", "application/json")
+                            .build()
+                        chain.proceed(request)
+                    }
+                    .build()
+            )
+            .addConverterFactory(MoshiConverterFactory.create(moshi))
+            .build()
+            .create(EspnSoccerService::class.java)
+    }
+
     /**
      * Generates a complete 15-match weekly bulletin with teams, dates, and live betting odds.
      */
@@ -291,7 +313,192 @@ object NetworkModule {
             bulletinTitle = "Spor Toto $weekNumber. Hafta Bülteni",
             startDate = "13.11.2026",
             endDate = "17.11.2026",
-            jackpotEstimateTL = 45000000.0,
+            jackpotEstimateTL = 0.0,
+            isActive = true,
+            matches = matches
+        )
+    }
+
+    /**
+     * Turkish League (Süper Lig & TFF 1. Lig) + Top European Leagues Spor Toto weekly bulletin.
+     * Team names and kickoff times align cleanly with API-Football (leagues 203, 204, 78, 61, 39, 140, 135).
+     */
+    fun createTurkishLeagueSporTotoBulletin(weekNumber: Int = 39): WeeklyBulletinResponse {
+        val matches = listOf(
+            BulletinMatchDto(
+                matchNumber = 1,
+                homeTeam = "GENÇLERBİRLİĞİ",
+                awayTeam = "GAZİANTEP FK A.Ş.",
+                matchDate = "21.11.2026 13:30",
+                league = "Trendyol Süper Lig",
+                venue = "Eryaman Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.62, drawOdd = 3.55, awayWinOdd = 4.90, doubleChance1X = 1.15, doubleChance12 = 1.24, doubleChanceX2 = 2.15, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 62, drawProbability = 22, awayProbability = 16)
+            ),
+            BulletinMatchDto(
+                matchNumber = 2,
+                homeTeam = "AMED SPORTİF FAALİYETLER",
+                awayTeam = "ÇAYKUR RİZESPOR A.Ş.",
+                matchDate = "21.11.2026 16:00",
+                league = "Türkiye Futbol Ligi",
+                venue = "Diyarbakır Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.38, drawOdd = 4.10, awayWinOdd = 6.90, doubleChance1X = 1.07, doubleChance12 = 1.18, doubleChanceX2 = 2.80, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 75, drawProbability = 15, awayProbability = 10)
+            ),
+            BulletinMatchDto(
+                matchNumber = 3,
+                homeTeam = "GALATASARAY A.Ş.",
+                awayTeam = "SAMSUNSPOR A.Ş.",
+                matchDate = "21.11.2026 16:00",
+                league = "Trendyol Süper Lig",
+                venue = "RAMS Park",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.18, drawOdd = 6.20, awayWinOdd = 11.50, doubleChance1X = 1.02, doubleChance12 = 1.10, doubleChanceX2 = 4.10, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 88, drawProbability = 7, awayProbability = 5)
+            ),
+            BulletinMatchDto(
+                matchNumber = 4,
+                homeTeam = "KOCAELİSPOR",
+                awayTeam = "FENERBAHÇE A.Ş.",
+                matchDate = "21.11.2026 19:00",
+                league = "Trendyol Süper Lig",
+                venue = "Kocaeli Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 8.20, drawOdd = 4.80, awayWinOdd = 1.30, doubleChance1X = 3.10, doubleChance12 = 1.14, doubleChanceX2 = 1.05, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 10, drawProbability = 12, awayProbability = 78)
+            ),
+            BulletinMatchDto(
+                matchNumber = 5,
+                homeTeam = "ERZURUMSPOR FK",
+                awayTeam = "GÖZTEPE A.Ş.",
+                matchDate = "22.11.2026 13:30",
+                league = "Türkiye Futbol Ligi",
+                venue = "Kazım Karabekir Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 3.40, drawOdd = 3.25, awayWinOdd = 1.98, doubleChance1X = 1.72, doubleChance12 = 1.29, doubleChanceX2 = 1.26, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 24, drawProbability = 28, awayProbability = 48)
+            ),
+            BulletinMatchDto(
+                matchNumber = 6,
+                homeTeam = "KASIMPAŞA A.Ş.",
+                awayTeam = "ALANYASPOR",
+                matchDate = "22.11.2026 16:00",
+                league = "Trendyol Süper Lig",
+                venue = "Recep Tayyip Erdoğan Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.45, drawOdd = 4.10, awayWinOdd = 6.20, doubleChance1X = 1.10, doubleChance12 = 1.20, doubleChanceX2 = 2.55, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 71, drawProbability = 16, awayProbability = 13)
+            ),
+            BulletinMatchDto(
+                matchNumber = 7,
+                homeTeam = "KONYASPOR",
+                awayTeam = "BEŞİKTAŞ A.Ş.",
+                matchDate = "22.11.2026 16:00",
+                league = "Trendyol Süper Lig",
+                venue = "Konya Büyükşehir Stadyumu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 7.40, drawOdd = 4.60, awayWinOdd = 1.34, doubleChance1X = 2.90, doubleChance12 = 1.16, doubleChanceX2 = 1.07, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 11, drawProbability = 13, awayProbability = 76)
+            ),
+            BulletinMatchDto(
+                matchNumber = 8,
+                homeTeam = "TRABZONSPOR A.Ş.",
+                awayTeam = "EYÜPSPOR",
+                matchDate = "22.11.2026 19:00",
+                league = "Trendyol Süper Lig",
+                venue = "Papara Park",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.12, drawOdd = 7.20, awayWinOdd = 15.0, doubleChance1X = 1.01, doubleChance12 = 1.06, doubleChanceX2 = 5.10, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 93, drawProbability = 4, awayProbability = 3)
+            ),
+            BulletinMatchDto(
+                matchNumber = 9,
+                homeTeam = "BAŞAKŞEHİR FK",
+                awayTeam = "ÇORUM FK",
+                matchDate = "23.11.2026 20:00",
+                league = "Türkiye Futbol Ligi",
+                venue = "Başakşehir Fatih Terim",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.60, drawOdd = 3.60, awayWinOdd = 5.10, doubleChance1X = 1.14, doubleChance12 = 1.24, doubleChanceX2 = 2.20, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 62, drawProbability = 23, awayProbability = 15)
+            ),
+            BulletinMatchDto(
+                matchNumber = 10,
+                homeTeam = "SCHALKE 04",
+                awayTeam = "STUTTGART",
+                matchDate = "21.11.2026 17:30",
+                league = "Almanya Ligi",
+                venue = "Veltins-Arena",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 5.20, drawOdd = 4.10, awayWinOdd = 1.52, doubleChance1X = 2.35, doubleChance12 = 1.20, doubleChanceX2 = 1.13, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 16, drawProbability = 17, awayProbability = 67)
+            ),
+            BulletinMatchDto(
+                matchNumber = 11,
+                homeTeam = "LİLLE",
+                awayTeam = "LYON",
+                matchDate = "21.11.2026 22:45",
+                league = "Fransa Ligue 1",
+                venue = "Stade Pierre-Mauroy",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.85, drawOdd = 3.45, awayWinOdd = 4.10, doubleChance1X = 1.22, doubleChance12 = 1.27, doubleChanceX2 = 1.85, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 55, drawProbability = 28, awayProbability = 17)
+            ),
+            BulletinMatchDto(
+                matchNumber = 12,
+                homeTeam = "NEWCASTLE UNITED",
+                awayTeam = "ARSENAL",
+                matchDate = "22.11.2026 15:30",
+                league = "İngiltere Premier Lig",
+                venue = "St James' Park",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 6.40, drawOdd = 4.30, awayWinOdd = 1.42, doubleChance1X = 2.60, doubleChance12 = 1.18, doubleChanceX2 = 1.09, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 12, drawProbability = 15, awayProbability = 73)
+            ),
+            BulletinMatchDto(
+                matchNumber = 13,
+                homeTeam = "LİVERPOOL",
+                awayTeam = "MANCHESTER UNİTED",
+                matchDate = "22.11.2026 19:30",
+                league = "İngiltere Premier Lig",
+                venue = "Anfield",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.50, drawOdd = 4.20, awayWinOdd = 5.60, doubleChance1X = 1.12, doubleChance12 = 1.19, doubleChanceX2 = 2.38, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 67, drawProbability = 18, awayProbability = 15)
+            ),
+            BulletinMatchDto(
+                matchNumber = 14,
+                homeTeam = "REAL MADRİD",
+                awayTeam = "ATLETİCO MADRİD",
+                matchDate = "22.11.2026 23:00",
+                league = "İspanya La Liga",
+                venue = "Santiago Bernabeu",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 1.90, drawOdd = 3.45, awayWinOdd = 3.90, doubleChance1X = 1.24, doubleChance12 = 1.27, doubleChanceX2 = 1.82, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 52, drawProbability = 26, awayProbability = 22)
+            ),
+            BulletinMatchDto(
+                matchNumber = 15,
+                homeTeam = "İNTER",
+                awayTeam = "AC MİLAN",
+                matchDate = "22.11.2026 22:45",
+                league = "İtalya Serie A",
+                venue = "San Siro",
+                status = "UPCOMING",
+                liveOdds = LiveBettingOddsDto(homeWinOdd = 2.02, drawOdd = 3.35, awayWinOdd = 3.65, doubleChance1X = 1.26, doubleChance12 = 1.28, doubleChanceX2 = 1.72, lastUpdated = "15.11.2026 23:00"),
+                probabilities = MatchProbabilitiesDto(homeProbability = 49, drawProbability = 27, awayProbability = 24)
+            )
+        )
+
+        return WeeklyBulletinResponse(
+            weekNumber = weekNumber,
+            season = "2026-2027",
+            bulletinTitle = "Türkiye Ligi Spor Toto $weekNumber. Hafta",
+            startDate = "21.11.2026",
+            endDate = "23.11.2026",
+            jackpotEstimateTL = 0.0,
             isActive = true,
             matches = matches
         )

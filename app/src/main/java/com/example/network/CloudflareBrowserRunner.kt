@@ -46,6 +46,8 @@ data class CloudflareAutoPlayResponse(
     val status: String = "ERROR",
     val sessionId: String = "",
     val playedColumnsCount: Int = 0,
+    val sessionVerified: Boolean? = null,
+    val playConfirmed: Boolean? = null,
     val steps: List<String> = emptyList(),
     val screenshotBase64: String? = null,
     val errorMessage: String? = null,
@@ -77,6 +79,8 @@ data class CloudflareWorkerRunResult(
     val status: CloudflareRunStatus,
     val sessionId: String = "",
     val playedColumnsCount: Int = 0,
+    val sessionVerified: Boolean? = null,
+    val playConfirmed: Boolean? = null,
     val steps: List<String> = emptyList(),
     val screenshotBase64: String? = null,
     val errorMessage: String? = null
@@ -383,6 +387,16 @@ object CloudflareBrowserRunner {
                             parsed.message?.takeIf { it.isNotBlank() }
                         ).firstOrNull()
 
+                        val hasVerifiedConfirmationStep = parsed.steps.any { step ->
+                            step.contains("onayı verildi", ignoreCase = true) ||
+                                step.contains("oturum kontrol", ignoreCase = true)
+                        }
+                        val missingRealPlayVerification = !dryRun &&
+                            parsed.status.equals("COMPLETED", ignoreCase = true) &&
+                            parsed.success &&
+                            (parsed.sessionVerified == false ||
+                                (parsed.sessionVerified == null && !hasVerifiedConfirmationStep))
+
                         val mappedStatus = when {
                             parsed.code.equals("NO_BULLETIN", ignoreCase = true) ||
                                 parsed.status.equals("NO_BULLETIN", ignoreCase = true) ->
@@ -390,6 +404,8 @@ object CloudflareBrowserRunner {
                             parsed.code.equals("INSUFFICIENT_BALANCE", ignoreCase = true) ||
                                 parsed.status.equals("INSUFFICIENT_BALANCE", ignoreCase = true) ->
                                 CloudflareRunStatus.INSUFFICIENT_BALANCE
+                            missingRealPlayVerification ->
+                                CloudflareRunStatus.LOGIN_FAILED
                             parsed.status.equals("COMPLETED", ignoreCase = true) && parsed.success ->
                                 CloudflareRunStatus.COMPLETED
                             parsed.status.equals("REQUIRES_2FA", ignoreCase = true) ->
@@ -401,10 +417,13 @@ object CloudflareBrowserRunner {
                             else -> CloudflareRunStatus.ERROR
                         }
 
-                        val resolvedErrorMessage = when (mappedStatus) {
-                            CloudflareRunStatus.COMPLETED -> null
-                            CloudflareRunStatus.NO_BULLETIN -> rawServerError ?: "Yeni bülten yüklenmedi"
-                            CloudflareRunStatus.INSUFFICIENT_BALANCE -> rawServerError ?: "Bakiye yetersiz"
+                        val resolvedErrorMessage = when {
+                            mappedStatus == CloudflareRunStatus.COMPLETED -> null
+                            missingRealPlayVerification ->
+                                "Nesine oturumu doğrulanamadı (ekran görüntüsünde 'Giriş Yap' görünüyorsa kupon onaylanmamıştır). " +
+                                    "'Tarayıcı Robotu (WebView)' ile Nesine'de oturum açıp 'Oyna / Onayla' butonunu kullanın (Cloudflare Worker kullanıyorsanız npx wrangler deploy ile güncelleyin)."
+                            mappedStatus == CloudflareRunStatus.NO_BULLETIN -> rawServerError ?: "Yeni bülten yüklenmedi"
+                            mappedStatus == CloudflareRunStatus.INSUFFICIENT_BALANCE -> rawServerError ?: "Bakiye yetersiz"
                             else -> formatWorkerHttpOrPayloadError(
                                 httpCode = response.code,
                                 httpMessage = response.message,
@@ -426,6 +445,8 @@ object CloudflareBrowserRunner {
                             status = mappedStatus,
                             sessionId = parsed.sessionId,
                             playedColumnsCount = parsed.playedColumnsCount,
+                            sessionVerified = parsed.sessionVerified,
+                            playConfirmed = parsed.playConfirmed,
                             steps = resolvedSteps,
                             screenshotBase64 = parsed.screenshotBase64,
                             errorMessage = resolvedErrorMessage

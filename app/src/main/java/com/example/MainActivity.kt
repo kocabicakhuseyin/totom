@@ -55,6 +55,7 @@ import com.example.viewmodel.TotoViewModel
 import androidx.compose.ui.platform.LocalContext
 import com.example.data.local.AppDatabase
 import com.example.data.repository.WalletRepository
+import com.example.repository.LiveScoreSource
 import com.example.repository.PoolRepository
 import com.example.repository.SporTotoBulletinRepositoryImpl
 import com.example.viewmodel.BillingViewModel
@@ -62,12 +63,17 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+import com.example.model.SupportedTeam
+import com.example.ui.screens.SupabaseAuthDialog
+
 class MainActivity : ComponentActivity() {
     private var incomingNesineUrl by mutableStateOf<String?>(null)
+    private var incomingAuthCallbackUri by mutableStateOf<android.net.Uri?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         incomingNesineUrl = extractNesineShareLink(intent)
+        incomingAuthCallbackUri = extractAuthCallbackUri(intent)
         enableEdgeToEdge(
             statusBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(15, 23, 42)),
             navigationBarStyle = SystemBarStyle.dark(android.graphics.Color.rgb(15, 23, 42))
@@ -76,7 +82,9 @@ class MainActivity : ComponentActivity() {
             MyApplicationTheme {
                 MainAppContent(
                     incomingNesineUrl = incomingNesineUrl,
-                    onNesineUrlHandled = { incomingNesineUrl = null }
+                    onNesineUrlHandled = { incomingNesineUrl = null },
+                    incomingAuthCallbackUri = incomingAuthCallbackUri,
+                    onAuthCallbackHandled = { incomingAuthCallbackUri = null }
                 )
             }
         }
@@ -85,7 +93,8 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        incomingNesineUrl = extractNesineShareLink(intent)
+        extractNesineShareLink(intent)?.let { incomingNesineUrl = it }
+        extractAuthCallbackUri(intent)?.let { incomingAuthCallbackUri = it }
     }
 
     private fun extractNesineShareLink(intent: Intent?): String? {
@@ -99,15 +108,33 @@ class MainActivity : ComponentActivity() {
             .map { it.value.trimEnd('.', ',', ')', ']', ';') }
             .firstOrNull(NesineReceiptParser::isShareUrl)
     }
+
+    private fun extractAuthCallbackUri(intent: Intent?): android.net.Uri? {
+        if (intent?.action != Intent.ACTION_VIEW) return null
+        val uri = intent.data ?: return null
+        return if (uri.scheme.equals("sportoto", ignoreCase = true) &&
+            uri.host.equals("auth-callback", ignoreCase = true)
+        ) {
+            uri
+        } else {
+            null
+        }
+    }
 }
 
 @Composable
-fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> Unit = {}) {
+fun MainAppContent(
+    incomingNesineUrl: String? = null,
+    onNesineUrlHandled: () -> Unit = {},
+    incomingAuthCallbackUri: android.net.Uri? = null,
+    onAuthCallbackHandled: () -> Unit = {}
+) {
     val context = LocalContext.current
     val walletRepository = remember {
         WalletRepository(AppDatabase.getInstance(context).walletDao())
     }
     val poolRepository = remember { PoolRepository(context) }
+    val memberSession by poolRepository.sessionState.collectAsStateWithLifecycle()
     val saveScope = rememberCoroutineScope()
     val viewModel: TotoViewModel = viewModel(
         factory = object : androidx.lifecycle.ViewModelProvider.Factory {
@@ -115,7 +142,9 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                 @Suppress("UNCHECKED_CAST")
                 return TotoViewModel(
                     bulletinRepository = SporTotoBulletinRepositoryImpl(
-                        applicationContext = context.applicationContext
+                        applicationContext = context.applicationContext,
+                        preferTurkishLeagueBulletin = true,
+                        initialSource = LiveScoreSource.ESPN
                     ),
                     walletRepository = walletRepository
                 ) as T
@@ -146,10 +175,14 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
     val liveScores by viewModel.liveScores.collectAsStateWithLifecycle()
     val currentBulletin by viewModel.currentBulletin.collectAsStateWithLifecycle()
     val liveScoreProvider by viewModel.liveScoreProvider.collectAsStateWithLifecycle()
+    val activeLiveScoreSource by viewModel.activeLiveScoreSource.collectAsStateWithLifecycle()
     val hasApiFootballKey by viewModel.hasApiFootballKey.collectAsStateWithLifecycle()
     val freeScoreRequestsRemaining by viewModel.freeScoreRequestsRemaining.collectAsStateWithLifecycle()
     val lastLiveUpdateTime by viewModel.lastLiveUpdateTime.collectAsStateWithLifecycle()
     val isRefreshingLiveScores by viewModel.isRefreshingLiveScores.collectAsStateWithLifecycle()
+    val previousWeekReport by viewModel.previousWeekReport.collectAsStateWithLifecycle()
+    val isLoadingPreviousWeek by viewModel.isLoadingPreviousWeek.collectAsStateWithLifecycle()
+    val previousWeekError by viewModel.previousWeekError.collectAsStateWithLifecycle()
 
     val favoritedMatchNumbers by viewModel.favoritedMatchNumbers.collectAsStateWithLifecycle()
     val liveScoreError by viewModel.liveScoreError.collectAsStateWithLifecycle()
@@ -193,8 +226,47 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
 
     var currentTab by remember { mutableStateOf(AppNavTab.HOME) }
     var showPool by remember { mutableStateOf(false) }
+    var showAuthDialog by remember { mutableStateOf(false) }
     LaunchedEffect(incomingNesineUrl) {
         if (incomingNesineUrl != null) showPool = true
+    }
+    LaunchedEffect(incomingAuthCallbackUri) {
+        val uri = incomingAuthCallbackUri ?: return@LaunchedEffect
+        onAuthCallbackHandled()
+        saveScope.launch {
+            poolRepository.handleOAuthCallbackUri(uri)
+                .onSuccess { session ->
+                    if (session.displayName.isNotBlank()) {
+                        viewModel.updateUsername(session.displayName)
+                    }
+                    SupportedTeam.values().firstOrNull { it.name == session.favoriteTeamId }?.let { team ->
+                        viewModel.updateFavoriteTeam(team)
+                    }
+                    showAuthDialog = false
+                    Toast.makeText(
+                        context,
+                        "✅ ${session.providerDisplayLabel} ile giriş başarılı (${session.displayName.ifBlank { session.email }})",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+                .onFailure { err ->
+                    Toast.makeText(
+                        context,
+                        err.message ?: "Giriş işlemi tamamlanamadı.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
+        }
+    }
+    LaunchedEffect(memberSession.isSignedIn, memberSession.displayName, memberSession.favoriteTeamId) {
+        if (memberSession.isSignedIn) {
+            if (memberSession.displayName.isNotBlank()) {
+                viewModel.updateUsername(memberSession.displayName)
+            }
+            SupportedTeam.values().firstOrNull { it.name == memberSession.favoriteTeamId }?.let { team ->
+                viewModel.updateFavoriteTeam(team)
+            }
+        }
     }
     LaunchedEffect(currentTab, showPool) {
         val showLiveScores = currentTab == AppNavTab.RESULTS || showPool
@@ -221,7 +293,9 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                 onProfileClick = { currentTab = AppNavTab.PROFILE },
                 onOpenWallet = { showGooglePlayDialog = true },
                 onLiveClick = { currentTab = AppNavTab.RESULTS },
-                liveMatchesCount = liveMatchesCount
+                liveMatchesCount = liveMatchesCount,
+                memberSession = memberSession,
+                onOpenAuth = { showAuthDialog = true }
             )
         },
         bottomBar = {
@@ -269,7 +343,9 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                                 showFormulaWizard = true
                             }
                         },
-                        onOpenWallet = { showGooglePlayDialog = true }
+                        onOpenWallet = { showGooglePlayDialog = true },
+                        jackpotEstimateTL = currentBulletin?.jackpotEstimateTL ?: 0.0,
+                        weekNumber = currentBulletin?.weekNumber
                     )
                 }
 
@@ -310,6 +386,15 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                         },
                         isRefreshing = isRefreshingBulletin,
                         onRefreshBulletin = { viewModel.refreshBulletin(forceRefresh = true) },
+                        onSyncTurkishLeagueBulletin = { viewModel.syncTurkishLeagueBulletinFromApi() },
+                        previousWeekReport = previousWeekReport,
+                        isLoadingPreviousWeek = isLoadingPreviousWeek,
+                        previousWeekError = previousWeekError,
+                        hasApiKey = hasApiFootballKey,
+                        requiresApiKey = activeLiveScoreSource == LiveScoreSource.API_FOOTBALL,
+                        providerLabel = activeLiveScoreSource.badgeLabel,
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) },
+                        onNavigateToLiveTab = { currentTab = AppNavTab.RESULTS },
                         favoritedMatchNumbers = favoritedMatchNumbers,
                         onToggleFavorite = { viewModel.toggleFavoriteMatch(it) },
                         hasPlayableBulletin = hasPlayableBulletin,
@@ -321,13 +406,27 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                     MatchResultsScreen(
                         liveScores = liveScores,
                         providerName = liveScoreProvider,
+                        activeSource = activeLiveScoreSource,
+                        onSelectSource = { viewModel.selectLiveScoreSource(it) },
                         hasApiKey = hasApiFootballKey,
                         freeRequestsRemaining = freeScoreRequestsRemaining,
                         onSaveApiKey = { viewModel.saveApiFootballKey(it) },
                         lastUpdateTime = lastLiveUpdateTime,
                         isRefreshing = isRefreshingLiveScores,
                         errorMessage = liveScoreError,
-                        onPollNow = { viewModel.pollLiveScoresNow() }
+                        onPollNow = { viewModel.pollLiveScoresNow() },
+                        matches = matches,
+                        coupons = coupons,
+                        onOpenCoupon = { coupon ->
+                            viewModel.setCurrentCoupon(coupon)
+                            currentTab = AppNavTab.COUPONS
+                        },
+                        isSyncingBulletin = isRefreshingBulletin,
+                        onSyncTurkishLeagueBulletin = { viewModel.syncTurkishLeagueBulletinFromApi() },
+                        previousWeekReport = previousWeekReport,
+                        isLoadingPreviousWeek = isLoadingPreviousWeek,
+                        previousWeekError = previousWeekError,
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) }
                     )
                 }
 
@@ -336,6 +435,7 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                         coupons = coupons,
                         currentCoupon = currentCoupon,
                         matches = matches,
+                        liveScores = liveScores,
                         savedCredentials = userProfile.nesineCredentials,
                         walletBalanceTL = userProfile.walletBalanceTL,
                         onSelectCoupon = { viewModel.setCurrentCoupon(it) },
@@ -382,8 +482,35 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                     ForumScreen(
                         forumPosts = forumPosts,
                         userProfile = userProfile,
-                        onAddPost = { content, couponId ->
-                            viewModel.addForumPost(content, couponId)
+                        matches = matches,
+                        liveScores = liveScores,
+                        bulletinWeekLabel = currentBulletin?.let { "${it.bulletinTitle} (${it.season})" },
+                        currentCoupon = currentCoupon,
+                        coupons = coupons,
+                        memberSession = memberSession,
+                        hasPlayableBulletin = hasPlayableBulletin,
+                        onRefreshBulletin = { viewModel.refreshBulletin(forceRefresh = true) },
+                        onOpenCouponInCoupons = { selectedCoupon ->
+                            viewModel.openSharedForumCoupon(selectedCoupon)
+                            currentTab = AppNavTab.COUPONS
+                        },
+                        onAddBulletinPost = { request ->
+                            val memberName = memberSession.displayName.takeIf { memberSession.isSignedIn && it.isNotBlank() }
+                            val providerBadge = if (memberSession.isSignedIn) memberSession.providerDisplayLabel else null
+                            viewModel.addForumPost(
+                                content = request.content,
+                                attachedCouponId = request.attachedCouponId,
+                                matchRef = request.matchReference,
+                                matchNumber = request.matchNumber,
+                                predictedOutcome = request.predictedOutcome,
+                                replyToPostId = request.replyToPostId,
+                                replyToAuthor = request.replyToAuthor,
+                                attachedCouponSummary = request.attachedCouponSummary,
+                                overrideAuthorName = memberName,
+                                providerLabel = providerBadge,
+                                attachedCouponColumns = request.attachedCouponColumns,
+                                attachedCouponFormulaTitle = request.attachedCouponFormulaTitle
+                            )
                         },
                         onToggleLike = { postId ->
                             viewModel.toggleLikePost(postId)
@@ -394,9 +521,43 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
                 AppNavTab.PROFILE -> {
                     ProfileScreen(
                         userProfile = userProfile,
-                        onUpdateUsername = { viewModel.updateUsername(it) },
-                        onSelectTeam = { viewModel.updateFavoriteTeam(it) },
-                        onOpenWallet = { showGooglePlayDialog = true }
+                        onUpdateUsername = { newName ->
+                            viewModel.updateUsername(newName)
+                            if (memberSession.isSignedIn) {
+                                saveScope.launch {
+                                    poolRepository.updateMemberProfile(username = newName)
+                                }
+                            }
+                        },
+                        onSelectTeam = { team ->
+                            viewModel.updateFavoriteTeam(team)
+                            if (memberSession.isSignedIn) {
+                                saveScope.launch {
+                                    poolRepository.updateMemberProfile(favoriteTeamId = team.name)
+                                }
+                            }
+                        },
+                        onOpenWallet = { showGooglePlayDialog = true },
+                        memberSession = memberSession,
+                        poolRepository = poolRepository,
+                        onOpenAuth = { showAuthDialog = true },
+                        onRefreshMemberProfile = {
+                            saveScope.launch {
+                                poolRepository.refreshProfileFromServer()
+                                    .onSuccess {
+                                        Toast.makeText(context, "Üye profili buluttan güncellendi.", Toast.LENGTH_SHORT).show()
+                                    }
+                                    .onFailure {
+                                        Toast.makeText(context, it.message ?: "Senkronizasyon başarısız.", Toast.LENGTH_SHORT).show()
+                                    }
+                            }
+                        },
+                        onSignOut = {
+                            saveScope.launch {
+                                poolRepository.signOutAsync()
+                                Toast.makeText(context, "Üye oturumu kapatıldı.", Toast.LENGTH_SHORT).show()
+                            }
+                        }
                     )
                 }
             }
@@ -494,4 +655,20 @@ fun MainAppContent(incomingNesineUrl: String? = null, onNesineUrlHandled: () -> 
         }
     }
 
+    if (showAuthDialog) {
+        SupabaseAuthDialog(
+            repository = poolRepository,
+            onDismiss = { showAuthDialog = false },
+            onAuthenticated = { displayName ->
+                if (displayName.isNotBlank()) {
+                    viewModel.updateUsername(displayName)
+                }
+                Toast.makeText(
+                    context,
+                    "Üye oturumu açıldı.",
+                    Toast.LENGTH_SHORT
+                ).show()
+            }
+        )
+    }
 }

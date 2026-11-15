@@ -216,7 +216,28 @@ data class ForumPost(
     val likesCount: Int = 0,
     val isLiked: Boolean = false,
     val attachedCouponId: String? = null,
-    val matchReference: String? = null
+    val matchReference: String? = null,
+    val matchNumber: Int? = null,
+    val predictedOutcome: PredictionOutcome? = null,
+    val replyToPostId: String? = null,
+    val replyToAuthor: String? = null,
+    val attachedCouponSummary: String? = null,
+    val providerLabel: String? = null,
+    val attachedCouponColumns: List<String> = emptyList(),
+    val attachedCouponFormulaTitle: String? = null
+)
+
+data class NewForumPostRequest(
+    val content: String,
+    val attachedCouponId: String? = null,
+    val attachedCouponSummary: String? = null,
+    val matchNumber: Int? = null,
+    val matchReference: String? = null,
+    val predictedOutcome: PredictionOutcome? = null,
+    val replyToPostId: String? = null,
+    val replyToAuthor: String? = null,
+    val attachedCouponColumns: List<String> = emptyList(),
+    val attachedCouponFormulaTitle: String? = null
 )
 
 data class PlatformCredentials(
@@ -280,7 +301,7 @@ data class UserProfile(
     val platformCredentials: Map<String, PlatformCredentials> = emptyMap(),
     val unreadMessagesCount: Int = 1,
     val hasFreeAutoPlay: Boolean = false,
-    val totalAutoPlayedCoupons: Int = 30251
+    val totalAutoPlayedCoupons: Int = 0
 ) {
     val nesineCredentials: PlatformCredentials
         get() = platformCredentials[BettingPlatform.NESINE.id] ?: PlatformCredentials(BettingPlatform.NESINE)

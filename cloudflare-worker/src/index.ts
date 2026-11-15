@@ -1,4 +1,4 @@
-import puppeteer, { type BrowserWorker } from "@cloudflare/puppeteer";
+import puppeteer, { type Browser, type BrowserWorker } from "@cloudflare/puppeteer";
 
 export interface Env {
   BROWSER?: BrowserWorker;
@@ -33,6 +33,8 @@ interface NesineAutoPlayResponse {
   status: AutoPlayStatus;
   sessionId: string;
   playedColumnsCount: number;
+  sessionVerified?: boolean;
+  playConfirmed?: boolean;
   steps: string[];
   screenshotBase64?: string;
   errorMessage?: string;
@@ -75,7 +77,7 @@ export default {
         {
           ok: browserReady,
           worker: "nesine-browser-runner",
-          version: "2.0.0",
+          version: "2.1.0",
           browserBindingReady: browserReady,
           authEnabled: configuredSecret.length > 0,
           message: browserReady
@@ -149,7 +151,7 @@ export default {
     const steps: string[] = [];
     const totalCostTL = Number(payload.totalCostTL ?? 0);
     const dryRun = payload.dryRun ?? true;
-    let browser: puppeteer.Browser | undefined;
+    let browser: Browser | undefined;
 
     try {
       steps.push("1/5 Cloudflare Browser Rendering oturumu başlatılıyor...");
@@ -208,96 +210,227 @@ export default {
         });
       }
 
-      // 3. Login check & safe form fill
-      steps.push(`3/5 '${payload.username}' hesabı ile giriş kontrol ediliyor...`);
-      const modalClicked = await page.evaluate(() => {
-        const hasPassword = !!document.querySelector("input[type='password']");
-        if (hasPassword) return false;
-        const modalBtn = document.querySelector<HTMLElement>(
-          "[data-testid='login-button'], button[class*='login'], button.login-btn, .header-login-btn"
-        );
-        if (modalBtn) {
-          modalBtn.click();
-          return true;
-        }
-        return false;
-      });
-
-      if (modalClicked) {
-        await sleep(700);
+      // Dismiss Nesine cookie consent banner ("Kabul Et") if present so it doesn't block login/play buttons
+      const dismissedCookie = await dismissCookieBanner(page);
+      if (dismissedCookie) {
+        await sleep(450);
       }
 
-      const loginSubmitted = await page.evaluate(
-        (user: string, pass: string) => {
-          const userInput = document.querySelector<HTMLInputElement>(
-            "input[name='username'], input[name='Username'], input[id*='user' i], input[placeholder*='Üye'], input[placeholder*='TC']"
+      // 3. Login check & safe form fill
+      steps.push(`3/5 '${payload.username}' hesabı ile oturum kontrol ediliyor...`);
+      const preSession = await inspectSessionState(page);
+
+      if (!preSession.loggedIn) {
+        const modalClicked = await page.evaluate(() => {
+          const hasVisiblePass = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='password']"))
+            .some((el) => {
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            });
+          if (hasVisiblePass) return false;
+
+          const byText = Array.from(document.querySelectorAll<HTMLElement>("button, a, div[role='button'], span[role='button']"))
+            .find((el) => {
+              const r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) return false;
+              const t = (el.innerText || "").trim().toLowerCase();
+              return t === "giriş yap" || t === "giris yap" || t === "üye girişi";
+            });
+          if (byText) {
+            byText.click();
+            return true;
+          }
+
+          const selectorBtn = document.querySelector<HTMLElement>(
+            "[data-testid='login-button'], button[class*='login' i], a[class*='login' i], button.login-btn, .header-login-btn"
           );
-          const passInput = document.querySelector<HTMLInputElement>(
-            "input[name='password'], input[name='Password'], input[type='password']"
-          );
-          if (!userInput || !passInput) return false;
+          if (selectorBtn) {
+            selectorBtn.click();
+            return true;
+          }
+          return false;
+        });
 
-          const setNativeValue = (el: HTMLInputElement, val: string) => {
-            const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-            if (setter) setter.call(el, val);
-            else el.value = val;
-            el.dispatchEvent(new Event("input", { bubbles: true }));
-            el.dispatchEvent(new Event("change", { bubbles: true }));
-          };
-
-          userInput.focus();
-          setNativeValue(userInput, user);
-          passInput.focus();
-          setNativeValue(passInput, pass);
-
-          const submit = document.querySelector<HTMLElement>(
-            "button[type='submit'], input[type='submit'], button[class*='submit']"
-          );
-          submit?.click();
-          return true;
-        },
-        payload.username.trim(),
-        payload.password
-      );
-
-      if (loginSubmitted) {
-        await sleep(2200);
-        const postLoginText = (await page.evaluate(() => document.body?.innerText ?? "")).toLowerCase();
-        if (
-          postLoginText.includes("sms şifresi") ||
-          postLoginText.includes("doğrulama kodu") ||
-          postLoginText.includes("tek kullanımlık") ||
-          postLoginText.includes("otp")
-        ) {
-          const shot = await screenshotSafe(page);
-          return jsonResponse<NesineAutoPlayResponse>({
-            success: false,
-            status: "REQUIRES_2FA",
-            sessionId,
-            playedColumnsCount: 0,
-            steps: [...steps, "📲 Nesine SMS doğrulama (2FA) kodu istedi."],
-            screenshotBase64: shot,
-            errorMessage: "Nesine SMS doğrulaması istedi. Uygulama içi WebView robotu üzerinden SMS kodunu girerek oynayabilirsiniz.",
-          });
+        if (modalClicked) {
+          await page
+            .waitForFunction(
+              () => {
+                const hasPass = Array.from(document.querySelectorAll("input[type='password']"))
+                  .some((el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                  });
+                return hasPass || document.querySelectorAll("iframe").length > 0;
+              },
+              { timeout: 3500 }
+            )
+            .catch(() => sleep(1000));
         }
 
-        if (
-          postLoginText.includes("hatalı şifre") ||
-          postLoginText.includes("şifreniz hatalı") ||
-          postLoginText.includes("üye numaranız veya şifreniz") ||
-          postLoginText.includes("kullanıcı adı veya şifre")
-        ) {
-          const shot = await screenshotSafe(page);
-          return jsonResponse<NesineAutoPlayResponse>({
-            success: false,
-            status: "LOGIN_FAILED",
-            sessionId,
-            playedColumnsCount: 0,
-            steps: [...steps, "❌ Nesine kullanıcı adı veya şifre hatalı."],
-            screenshotBase64: shot,
-            errorMessage: "Nesine girişi reddedildi: kullanıcı adı veya şifre hatalı.",
-          });
+        // Fill credentials across main document or any child login iframe
+        const fillCredentialsInContext = async (ctx: {
+          evaluate: <A extends unknown[], R>(fn: (...args: A) => R, ...args: A) => Promise<R>;
+        }) => {
+          return await ctx
+            .evaluate(
+              (user: string, pass: string) => {
+                const visiblePass = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='password']"))
+                  .find((el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0;
+                  });
+                if (!visiblePass) return false;
+
+                const userSelectors = [
+                  "input[name='username']", "input[name='Username']", "input[name='UserName']",
+                  "input[name*='member' i]", "input[name*='user' i]",
+                  "input[id*='user' i]", "input[id*='member' i]", "input[id*='tc' i]",
+                  "input[placeholder*='Üye' i]", "input[placeholder*='T.C.' i]",
+                  "input[placeholder*='Kimlik' i]", "input[placeholder*='TC' i]",
+                  "input[autocomplete='username']", "input[type='tel']"
+                ];
+                let visibleUser: HTMLInputElement | null = null;
+                for (const sel of userSelectors) {
+                  const found = Array.from(document.querySelectorAll<HTMLInputElement>(sel))
+                    .find((el) => {
+                      const r = el.getBoundingClientRect();
+                      return r.width > 0 && r.height > 0 && el.type !== "password";
+                    });
+                  if (found) {
+                    visibleUser = found;
+                    break;
+                  }
+                }
+                if (!visibleUser) {
+                  const scopeEl = visiblePass.closest("form, .modal, [role='dialog'], div") ?? document;
+                  visibleUser = Array.from(
+                    scopeEl.querySelectorAll<HTMLInputElement>("input[type='text'], input[type='tel'], input[type='number'], input:not([type])")
+                  ).find((el) => {
+                    const r = el.getBoundingClientRect();
+                    return r.width > 0 && r.height > 0 && el !== visiblePass;
+                  }) ?? null;
+                }
+                if (!visibleUser) return false;
+
+                const setNativeValue = (el: HTMLInputElement, val: string) => {
+                  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+                  if (setter) setter.call(el, val);
+                  else el.value = val;
+                  el.dispatchEvent(new Event("input", { bubbles: true }));
+                  el.dispatchEvent(new Event("change", { bubbles: true }));
+                  el.dispatchEvent(new Event("blur", { bubbles: true }));
+                };
+
+                visibleUser.focus();
+                setNativeValue(visibleUser, user);
+                visiblePass.focus();
+                setNativeValue(visiblePass, pass);
+
+                const form = visiblePass.closest("form, .modal, [role='dialog']") ?? document;
+                let submit = Array.from(form.querySelectorAll<HTMLElement>("button, a[role='button'], input[type='submit']"))
+                  .find((el) => {
+                    const r = el.getBoundingClientRect();
+                    if (r.width <= 0 || r.height <= 0) return false;
+                    const t = (el.innerText || (el as HTMLInputElement).value || "").trim().toLowerCase();
+                    return t === "giriş yap" || t === "giris yap" || t === "giriş" || t === "devam et";
+                  }) ?? null;
+                if (!submit) {
+                  submit = form.querySelector<HTMLElement>("button[type='submit'], input[type='submit'], button[class*='login' i]");
+                }
+                submit?.click();
+                return true;
+              },
+              payload.username.trim(),
+              payload.password
+            )
+            .catch(() => false);
+        };
+
+        let loginSubmitted = await fillCredentialsInContext(page);
+        if (!loginSubmitted) {
+          for (const frame of page.frames()) {
+            if (frame === page.mainFrame()) continue;
+            if (await fillCredentialsInContext(frame)) {
+              loginSubmitted = true;
+              break;
+            }
+          }
         }
+
+        if (loginSubmitted) {
+          await page
+            .waitForFunction(
+              () => {
+                const txt = (document.body?.innerText ?? "").toLowerCase();
+                const hasBalance = !!document.querySelector("[class*='balance' i], [class*='bakiye' i], .user-balance, .wallet-amount, a[href*='hesabim']");
+                return (
+                  hasBalance ||
+                  txt.includes("hesabım") ||
+                  txt.includes("çıkış") ||
+                  txt.includes("sms şifresi") ||
+                  txt.includes("doğrulama kodu") ||
+                  txt.includes("hatalı şifre") ||
+                  txt.includes("doğrulama")
+                );
+              },
+              { timeout: 5000 }
+            )
+            .catch(() => sleep(1500));
+
+          if (!page.url().includes("/sportoto")) {
+            await page.goto(NESINE_SPORTOTO_URL, { waitUntil: "domcontentloaded", timeout: 15000 }).catch(() => undefined);
+            await dismissCookieBanner(page);
+          }
+        }
+      }
+
+      const postSession = await inspectSessionState(page);
+      if (postSession.requires2fa) {
+        const shot = await screenshotSafe(page);
+        return jsonResponse<NesineAutoPlayResponse>({
+          success: false,
+          status: "REQUIRES_2FA",
+          sessionId,
+          playedColumnsCount: 0,
+          sessionVerified: false,
+          playConfirmed: false,
+          steps: [...steps, "📲 Nesine SMS doğrulama (2FA) / ek onay kodu istedi."],
+          screenshotBase64: shot,
+          errorMessage: "Nesine SMS doğrulaması istedi. Uygulama içi WebView robotu üzerinden SMS kodunu girerek oynayabilirsiniz.",
+        });
+      }
+
+      if (postSession.hasLoginError) {
+        const shot = await screenshotSafe(page);
+        return jsonResponse<NesineAutoPlayResponse>({
+          success: false,
+          status: "LOGIN_FAILED",
+          sessionId,
+          playedColumnsCount: 0,
+          sessionVerified: false,
+          playConfirmed: false,
+          steps: [...steps, "❌ Nesine kullanıcı adı veya şifre hatalı."],
+          screenshotBase64: shot,
+          errorMessage: "Nesine girişi reddedildi: kullanıcı adı veya şifre hatalı.",
+        });
+      }
+
+      if (!dryRun && !postSession.loggedIn) {
+        const shot = await screenshotSafe(page);
+        return jsonResponse<NesineAutoPlayResponse>({
+          success: false,
+          status: "LOGIN_FAILED",
+          sessionId,
+          playedColumnsCount: 0,
+          sessionVerified: false,
+          playConfirmed: false,
+          steps: [...steps, "❌ Nesine oturumu açılamadı (sayfada hâlâ 'Giriş Yap' görünüyor)."],
+          screenshotBase64: shot,
+          errorMessage: "Nesine oturumu açılmadı (bulut tarayıcıda giriş tamamlanamadı). Kuponu oynamak için Uygulama İçi Tarayıcı Robotu (WebView) üzerinden giriş yapın.",
+        });
+      }
+      if (dryRun && !postSession.loggedIn) {
+        steps.push("⚠️ Oturum kapalı (Önizleme Modu nedeniyle yalnızca kolon işaretlemesi devam ediyor).");
       }
 
       // 4. Verify active 15-match Spor Toto bulletin
@@ -344,6 +477,7 @@ export default {
       let playedCount = 0;
       const chunkSize = 4;
 
+      let anyPlayConfirmed = false;
       for (let start = 0; start < payload.columns.length; start += chunkSize) {
         const batchCols = payload.columns.slice(start, start + chunkSize);
         const batchMarked = await page.evaluate((cols: ColumnPayload[]) => {
@@ -414,6 +548,8 @@ export default {
         playedCount += batchMarked;
 
         if (!dryRun) {
+          await dismissCookieBanner(page);
+
           // Verify Nesine wallet balance before submitting
           const balanceIssue = await page.evaluate((requiredCost: number) => {
             const text = (document.body?.innerText ?? "").toLowerCase();
@@ -448,19 +584,130 @@ export default {
               status: "INSUFFICIENT_BALANCE",
               sessionId,
               playedColumnsCount: playedCount,
+              sessionVerified: postSession.loggedIn,
+              playConfirmed: anyPlayConfirmed,
               steps: [...steps, "❌ Nesine hesabında yeterli bakiye bulunamadı."],
               screenshotBase64: balanceShot,
               errorMessage: "Bakiye yetersiz",
             });
           }
 
-          await page.evaluate(() => {
-            const playBtn = document.querySelector<HTMLElement>(
-              "button[class*='play'], button[class*='oyna'], [data-testid='submit-coupon']"
+          const playClicked = await page.evaluate(() => {
+            const selectorBtn = document.querySelector<HTMLElement>(
+              "[data-testid='submit-coupon'], button[class*='hemen-oyna' i], button[class*='play' i], button[class*='oyna' i]"
             );
-            playBtn?.click();
+            const targetBtn =
+              selectorBtn ??
+              Array.from(document.querySelectorAll<HTMLElement>("button, a[role='button'], input[type='submit']"))
+                .find((el) => {
+                  const r = el.getBoundingClientRect();
+                  if (r.width <= 0 || r.height <= 0) return false;
+                  const t = (el.innerText || "").trim().toLowerCase();
+                  return t === "hemen oyna" || t === "kuponu oyna" || t === "oyna" || t === "kupon yatır";
+                }) ??
+              null;
+            if (!targetBtn) return false;
+            targetBtn.scrollIntoView({ behavior: "smooth", block: "center" });
+            targetBtn.click();
+            return true;
           });
-          await sleep(1200);
+
+          if (!playClicked) {
+            const noPlayShot = await screenshotSafe(page);
+            return jsonResponse<NesineAutoPlayResponse>({
+              success: false,
+              status: "ERROR",
+              sessionId,
+              playedColumnsCount: playedCount,
+              sessionVerified: postSession.loggedIn,
+              playConfirmed: anyPlayConfirmed,
+              steps: [...steps, "❌ 'Hemen Oyna' butonu bulunamadı; oynama onayı açılamadı."],
+              screenshotBase64: noPlayShot,
+              errorMessage: "Nesine sayfasında 'Hemen Oyna' butonu bulunamadı. Uygulama İçi Tarayıcı Robotu (WebView) ile devam edin.",
+            });
+          }
+
+          await sleep(1400);
+
+          // Check if clicking play prompted login/2FA/insufficient balance OR opened confirmation modal
+          const postPlayOutcome = await page.evaluate(() => {
+            const bodyTxt = (document.body?.innerText ?? "").toLowerCase();
+            const hasPassword = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='password']"))
+              .some((el) => {
+                const r = el.getBoundingClientRect();
+                return r.width > 0 && r.height > 0;
+              });
+            if (hasPassword || bodyTxt.includes("üye girişi yapmanız")) {
+              return { state: "NOT_LOGGED_IN" };
+            }
+            if (bodyTxt.includes("bakiye yetersiz") || bodyTxt.includes("yetersiz bakiye")) {
+              return { state: "INSUFFICIENT_BALANCE" };
+            }
+            if (bodyTxt.includes("sms şifresi") || bodyTxt.includes("doğrulama kodu")) {
+              return { state: "REQUIRES_2FA" };
+            }
+            const confirmBtn = Array.from(
+              document.querySelectorAll<HTMLElement>(".modal button, [role='dialog'] button, [class*='modal' i] button, [class*='dialog' i] button, button")
+            ).find((el) => {
+              const r = el.getBoundingClientRect();
+              if (r.width <= 0 || r.height <= 0) return false;
+              const t = (el.innerText || "").trim().toLowerCase();
+              return t === "onayla" || t === "kuponu onayla" || t === "oynamayı onayla" || t === "evet";
+            });
+            if (confirmBtn) {
+              confirmBtn.click();
+              return { state: "CONFIRMED", label: confirmBtn.innerText.trim() };
+            }
+            return { state: "NO_MODAL" };
+          });
+
+          if (postPlayOutcome.state === "NOT_LOGGED_IN") {
+            const shot = await screenshotSafe(page);
+            return jsonResponse<NesineAutoPlayResponse>({
+              success: false,
+              status: "LOGIN_FAILED",
+              sessionId,
+              playedColumnsCount: playedCount,
+              sessionVerified: false,
+              playConfirmed: false,
+              steps: [...steps, "❌ Oynama aşamasında Nesine oturum açılmasını istedi."],
+              screenshotBase64: shot,
+              errorMessage: "Oynama onayı için Nesine oturumu kapalı görünüyor. WebView robotundan giriş yapıp oynayabilirsiniz.",
+            });
+          }
+          if (postPlayOutcome.state === "INSUFFICIENT_BALANCE") {
+            const shot = await screenshotSafe(page);
+            return jsonResponse<NesineAutoPlayResponse>({
+              success: false,
+              status: "INSUFFICIENT_BALANCE",
+              sessionId,
+              playedColumnsCount: playedCount,
+              sessionVerified: postSession.loggedIn,
+              playConfirmed: false,
+              steps: [...steps, "❌ Oynama onayında yetersiz bakiye uyarısı alındı."],
+              screenshotBase64: shot,
+              errorMessage: "Bakiye yetersiz",
+            });
+          }
+          if (postPlayOutcome.state === "REQUIRES_2FA") {
+            const shot = await screenshotSafe(page);
+            return jsonResponse<NesineAutoPlayResponse>({
+              success: false,
+              status: "REQUIRES_2FA",
+              sessionId,
+              playedColumnsCount: playedCount,
+              sessionVerified: postSession.loggedIn,
+              playConfirmed: false,
+              steps: [...steps, "📲 Oynama onayı için SMS (2FA) doğrulaması gerekli."],
+              screenshotBase64: shot,
+              errorMessage: "Oynama onayı için SMS doğrulaması gerekiyor; WebView robotuyla devam edebilirsiniz.",
+            });
+          }
+          if (postPlayOutcome.state === "CONFIRMED") {
+            anyPlayConfirmed = true;
+            await sleep(1400);
+            steps.push(`✅ Nesine oynama onayı verildi (${postPlayOutcome.label ?? "Onayla"}).`);
+          }
         }
       }
 
@@ -472,6 +719,8 @@ export default {
           status: "NO_BULLETIN",
           sessionId,
           playedColumnsCount: 0,
+          sessionVerified: postSession.loggedIn,
+          playConfirmed: false,
           steps: [...steps, "❌ Kupon alanları işaretlenemedi (bülten açık değil)."],
           screenshotBase64,
           errorMessage: "Yeni bülten yüklenmedi",
@@ -489,6 +738,8 @@ export default {
         status: "COMPLETED",
         sessionId,
         playedColumnsCount: playedCount,
+        sessionVerified: postSession.loggedIn,
+        playConfirmed: dryRun ? false : anyPlayConfirmed,
         steps,
         screenshotBase64,
       });
@@ -514,6 +765,88 @@ export default {
     }
   },
 };
+
+async function dismissCookieBanner(page: {
+  evaluate: <R>(fn: () => R) => Promise<R>;
+}): Promise<boolean> {
+  return await page
+    .evaluate(() => {
+      const acceptById = document.querySelector<HTMLElement>(
+        "#onetrust-accept-btn-handler, button[data-testid*='cookie-accept' i], button[class*='cookie-accept' i]"
+      );
+      if (acceptById) {
+        acceptById.click();
+        return true;
+      }
+      const btn = Array.from(document.querySelectorAll<HTMLElement>("button, a"))
+        .find((el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          const t = (el.innerText || "").trim().toLowerCase();
+          return t === "kabul et" || t === "tümünü kabul et" || t === "çerezleri kabul et";
+        });
+      if (btn) {
+        btn.click();
+        return true;
+      }
+      return false;
+    })
+    .catch(() => false);
+}
+
+async function inspectSessionState(page: {
+  evaluate: <R>(fn: () => R) => Promise<R>;
+}): Promise<{ loggedIn: boolean; requires2fa: boolean; hasLoginError: boolean }> {
+  return await page
+    .evaluate(() => {
+      const bodyText = (document.body?.innerText ?? "").toLowerCase();
+      const headerEl = document.querySelector("header, nav, .header, [class*='header' i]");
+      const headerText = (headerEl instanceof HTMLElement ? headerEl.innerText : bodyText.slice(0, 1500)).toLowerCase();
+      const hasBalanceEl = !!document.querySelector(
+        "[class*='balance' i], [class*='bakiye' i], [data-testid*='balance' i], .user-balance, .wallet-amount, a[href*='hesabim'], a[href*='para-yatir']"
+      );
+      const hasLoggedInText =
+        headerText.includes("hesabım") ||
+        headerText.includes("hesabim") ||
+        headerText.includes("çıkış") ||
+        headerText.includes("cikis") ||
+        headerText.includes("para yatır") ||
+        headerText.includes("kuponlarım");
+      const visibleLoginBySelector = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-testid='login-button'], .login-btn, .header-login-btn, button[class*='login' i], a[class*='login' i]")
+      ).some((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      const visibleLoginByText = Array.from(document.querySelectorAll<HTMLElement>("button, a"))
+        .some((el) => {
+          const r = el.getBoundingClientRect();
+          if (r.width <= 0 || r.height <= 0) return false;
+          const t = (el.innerText || "").trim().toLowerCase();
+          return t === "giriş yap" || t === "giris yap" || t === "üye ol";
+        });
+      const visiblePassword = Array.from(document.querySelectorAll<HTMLInputElement>("input[type='password']"))
+        .some((el) => {
+          const r = el.getBoundingClientRect();
+          return r.width > 0 && r.height > 0;
+        });
+
+      return {
+        loggedIn: (hasBalanceEl || hasLoggedInText) && !visiblePassword && !visibleLoginBySelector && !visibleLoginByText,
+        requires2fa:
+          bodyText.includes("sms şifresi") ||
+          bodyText.includes("doğrulama kodu") ||
+          bodyText.includes("tek kullanımlık") ||
+          bodyText.includes("otp"),
+        hasLoginError:
+          bodyText.includes("hatalı şifre") ||
+          bodyText.includes("şifreniz hatalı") ||
+          bodyText.includes("üye numaranız veya şifreniz") ||
+          bodyText.includes("kullanıcı adı veya şifre"),
+      };
+    })
+    .catch(() => ({ loggedIn: false, requires2fa: false, hasLoginError: false }));
+}
 
 function isAuthorized(request: Request, expectedToken: string): boolean {
   const auth = (request.headers.get("Authorization") ?? "").trim();

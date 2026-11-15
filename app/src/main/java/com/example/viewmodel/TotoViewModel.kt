@@ -16,9 +16,13 @@ import com.example.model.SupportedTeam
 import com.example.model.TotoColumn
 import com.example.model.TotoMatch
 import com.example.model.UserProfile
+import com.example.network.NetworkModule
 import com.example.network.model.NO_NEW_BULLETIN_ERROR
+import com.example.network.model.PreviousWeekBulletinReport
 import com.example.network.model.WeeklyBulletinResponse
 import com.example.network.model.isPlayable
+import com.example.network.model.toDomainTotoMatch
+import com.example.repository.LiveScoreSource
 import com.example.repository.SporTotoBulletinRepository
 import com.example.repository.SporTotoBulletinRepositoryImpl
 import kotlinx.coroutines.delay
@@ -99,6 +103,7 @@ class TotoViewModel(
 
     val liveScores: StateFlow<List<MatchLiveScore>> = bulletinRepository.liveScores
     val liveScoreProvider: StateFlow<String> = bulletinRepository.liveScoreProvider
+    val activeLiveScoreSource: StateFlow<LiveScoreSource> = bulletinRepository.activeLiveScoreSource
 
     private val _hasApiFootballKey = MutableStateFlow(bulletinRepository.hasApiFootballKey())
     val hasApiFootballKey: StateFlow<Boolean> = _hasApiFootballKey.asStateFlow()
@@ -107,12 +112,48 @@ class TotoViewModel(
         MutableStateFlow(bulletinRepository.freeScoreRequestsRemaining())
     val freeScoreRequestsRemaining: StateFlow<Int?> = _freeScoreRequestsRemaining.asStateFlow()
 
+    fun selectLiveScoreSource(source: LiveScoreSource) {
+        bulletinRepository.setLiveScoreSource(source)
+        _liveScoreError.value = null
+        _previousWeekError.value = null
+        _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
+        if (!bulletinRepository.requiresApiKeyForActiveSource() || bulletinRepository.hasApiFootballKey()) {
+            pollLiveScoresNow()
+        }
+    }
+
     fun saveApiFootballKey(key: String) {
         bulletinRepository.configureApiFootballKey(key)
         _hasApiFootballKey.value = bulletinRepository.hasApiFootballKey()
         _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
         _liveScoreError.value = null
+        _previousWeekError.value = null
         if (_hasApiFootballKey.value) pollLiveScoresNow()
+    }
+
+    val previousWeekReport: StateFlow<PreviousWeekBulletinReport?> =
+        bulletinRepository.previousWeekReport
+
+    private val _isLoadingPreviousWeek = MutableStateFlow(false)
+    val isLoadingPreviousWeek: StateFlow<Boolean> = _isLoadingPreviousWeek.asStateFlow()
+
+    private val _previousWeekError = MutableStateFlow<String?>(null)
+    val previousWeekError: StateFlow<String?> = _previousWeekError.asStateFlow()
+
+    fun loadPreviousWeekBulletin(forceRefresh: Boolean = false) {
+        if (_isLoadingPreviousWeek.value) return
+        viewModelScope.launch {
+            _isLoadingPreviousWeek.value = true
+            _previousWeekError.value = null
+            val res = bulletinRepository.fetchPreviousWeekBulletinAndResults(forceRefresh = forceRefresh)
+            res.onSuccess {
+                _previousWeekError.value = null
+            }.onFailure { err ->
+                _previousWeekError.value = err.message ?: "Geçen haftanın sonuçları alınamadı."
+            }
+            _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
+            _isLoadingPreviousWeek.value = false
+        }
     }
 
     private val _isLivePolling = MutableStateFlow(false)
@@ -197,6 +238,7 @@ class TotoViewModel(
                         _matches.value = freshMatches
                         _hasPlayableBulletin.value = true
                         _bulletinError.value = null
+                        syncStarterForumPostsWithBulletin(freshMatches)
                         if (forceRefresh) {
                             _bulletinMessage.value = "Haftalık bülten ve canlı oranlar güncellendi!"
                         }
@@ -213,6 +255,58 @@ class TotoViewModel(
                     _bulletinError.value = errorMsg
                     _bulletinMessage.value = errorMsg
                 }
+            } finally {
+                _isRefreshingBulletin.value = false
+            }
+        }
+    }
+
+    fun syncTurkishLeagueBulletinFromApi() {
+        if (_isRefreshingBulletin.value) return
+        _isRefreshingBulletin.value = true
+        viewModelScope.launch {
+            try {
+                if (bulletinRepository.requiresApiKeyForActiveSource() && !bulletinRepository.hasApiFootballKey()) {
+                    val result = bulletinRepository.getDomainMatches(forceRefresh = true)
+                    result.onSuccess { freshMatches ->
+                        val bulletin = currentBulletin.value
+                        if (freshMatches.size >= 15 && (bulletin == null || bulletin.isPlayable())) {
+                            _matches.value = freshMatches
+                            _hasPlayableBulletin.value = true
+                            _bulletinError.value = null
+                            syncStarterForumPostsWithBulletin(freshMatches)
+                        }
+                    }
+                    _bulletinMessage.value =
+                        "Türkiye Ligi bülteni hazır. Canlı API-Football takibi için Canlı sekmesinden anahtar girin veya ESPN'e geçin."
+                    return@launch
+                }
+
+                val syncResult = bulletinRepository.syncTurkishLeagueBulletinFromApi()
+                syncResult.onSuccess { bulletin ->
+                    val freshMatches = bulletin.matches.map { it.toDomainTotoMatch() }
+                    val playable = freshMatches.size >= 15 && bulletin.isPlayable()
+                    if (playable) {
+                        _matches.value = freshMatches
+                        _hasPlayableBulletin.value = true
+                        _bulletinError.value = null
+                        _liveScoreError.value = null
+                        _lastLiveUpdateTime.value =
+                            SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                        syncStarterForumPostsWithBulletin(freshMatches)
+                        val badge = bulletinRepository.activeLiveScoreSource.value.badgeLabel
+                        _bulletinMessage.value =
+                            "Türkiye Ligi & Avrupa bülteni ($badge) ile bağlandı ve maç takibi başlatıldı!"
+                    } else {
+                        _matches.value = emptyList()
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = NO_NEW_BULLETIN_ERROR
+                        _bulletinMessage.value = NO_NEW_BULLETIN_ERROR
+                    }
+                }.onFailure { err ->
+                    _bulletinMessage.value = err.message ?: "Türkiye Ligi senkronizasyonu başarısız."
+                }
+                _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
             } finally {
                 _isRefreshingBulletin.value = false
             }
@@ -378,7 +472,6 @@ class TotoViewModel(
         _coupons.update { listOf(newCoupon) + it }
         _currentCoupon.value = newCoupon
         currentCouponSourceMatches = _matches.value
-        _userProfile.update { it.copy(totalAutoPlayedCoupons = it.totalAutoPlayedCoupons + 1) }
         return newCoupon
     }
 
@@ -650,21 +743,92 @@ class TotoViewModel(
         return true
     }
 
-    fun addForumPost(content: String, attachedCouponId: String? = null, matchRef: String? = null) {
+    fun addForumPost(
+        content: String,
+        attachedCouponId: String? = null,
+        matchRef: String? = null,
+        matchNumber: Int? = null,
+        predictedOutcome: PredictionOutcome? = null,
+        replyToPostId: String? = null,
+        replyToAuthor: String? = null,
+        attachedCouponSummary: String? = null,
+        overrideAuthorName: String? = null,
+        providerLabel: String? = null,
+        attachedCouponColumns: List<String> = emptyList(),
+        attachedCouponFormulaTitle: String? = null
+    ) {
         if (content.isBlank()) return
         val profile = _userProfile.value
+        val matchedBulletinGame = matchNumber?.let { num ->
+            _matches.value.firstOrNull { it.matchNumber == num }
+        }
+        val resolvedMatchRef = matchRef?.takeIf { it.isNotBlank() }
+            ?: matchedBulletinGame?.let { "#${it.matchNumber} ${it.homeTeam} - ${it.awayTeam}" }
+        val attachedCoupon = attachedCouponId?.let { id ->
+            _coupons.value.firstOrNull { it.id == id }
+        }
+        val resolvedCouponSummary = attachedCouponSummary?.takeIf { it.isNotBlank() }
+            ?: attachedCoupon?.let { "${it.title} (${it.totalColumns} Kolon)" }
+        val resolvedColumns = attachedCouponColumns.ifEmpty {
+            attachedCoupon?.columns?.map { it.asString }.orEmpty()
+        }
+        val resolvedFormulaTitle = attachedCouponFormulaTitle?.takeIf { it.isNotBlank() }
+            ?: attachedCoupon?.formulaType?.title
         val post = ForumPost(
             id = "post_${System.currentTimeMillis()}",
-            authorName = profile.username,
+            authorName = overrideAuthorName?.trim()?.takeIf { it.isNotEmpty() } ?: profile.username,
             authorTeam = profile.favoriteTeam,
-            authorTitle = "Spor Toto Uzmanı",
+            authorTitle = if (!providerLabel.isNullOrBlank()) "Doğrulanmış Üye" else "Spor Toto Uzmanı",
             content = content.trim(),
-            dateText = "Bugün ${java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(java.util.Date())}",
+            dateText = "Bugün ${SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date())}",
             likesCount = 0,
             attachedCouponId = attachedCouponId,
-            matchReference = matchRef
+            matchReference = resolvedMatchRef,
+            matchNumber = matchNumber,
+            predictedOutcome = predictedOutcome,
+            replyToPostId = replyToPostId,
+            replyToAuthor = replyToAuthor,
+            attachedCouponSummary = resolvedCouponSummary,
+            providerLabel = providerLabel,
+            attachedCouponColumns = resolvedColumns,
+            attachedCouponFormulaTitle = resolvedFormulaTitle
         )
         _forumPosts.update { listOf(post) + it }
+    }
+
+    fun openSharedForumCoupon(coupon: Coupon) {
+        _coupons.update { existing ->
+            if (existing.any { it.id == coupon.id }) existing
+            else listOf(coupon) + existing
+        }
+        _currentCoupon.value = coupon
+        currentCouponSourceMatches = _matches.value
+    }
+
+    private fun syncStarterForumPostsWithBulletin(freshMatches: List<TotoMatch>) {
+        if (freshMatches.isEmpty()) return
+        val m1 = freshMatches.getOrNull(0)
+        val m6 = freshMatches.getOrNull(5)
+        val m7 = freshMatches.getOrNull(6)
+        _forumPosts.update { posts ->
+            posts.map { post ->
+                when (post.id) {
+                    "p1" -> if (m1 != null) post.copy(
+                        matchNumber = m1.matchNumber,
+                        matchReference = "#${m1.matchNumber} ${m1.homeTeam} - ${m1.awayTeam}"
+                    ) else post
+                    "p3" -> if (m6 != null) post.copy(
+                        matchNumber = m6.matchNumber,
+                        matchReference = "#${m6.matchNumber} ${m6.homeTeam} - ${m6.awayTeam}"
+                    ) else post
+                    "p4" -> if (m7 != null) post.copy(
+                        matchNumber = m7.matchNumber,
+                        matchReference = "#${m7.matchNumber} ${m7.homeTeam} - ${m7.awayTeam}"
+                    ) else post
+                    else -> post
+                }
+            }
+        }
     }
 
     fun toggleLikePost(postId: String) {
@@ -692,42 +856,32 @@ class TotoViewModel(
     }
 
     private fun createInitialMatches(): List<TotoMatch> {
-        return listOf(
-            TotoMatch(1, 1, "FRANSA", "TÜRKİYE", "15.11.2026 22:45", MatchProbability(listOf(79, 81, 78, 88), listOf(10, 9, 11, 8), listOf(11, 9, 11, 4))),
-            TotoMatch(2, 2, "BULGARİSTAN", "İZLANDA", "13.11.2026 22:45", MatchProbability(listOf(43, 34, 24, 27), listOf(26, 27, 28, 34), listOf(31, 38, 48, 39))),
-            TotoMatch(3, 3, "LİHTENŞTAYN", "AZERBAYCAN", "13.11.2026 22:45", MatchProbability(listOf(9, 9, 6, 6), listOf(16, 15, 14, 17), listOf(75, 75, 80, 77))),
-            TotoMatch(4, 4, "LÜKSEMBURG", "ESTONYA", "13.11.2026 22:45", MatchProbability(listOf(61, 51, 46, 40), listOf(21, 24, 29, 30), listOf(18, 23, 25, 30))),
-            TotoMatch(5, 5, "SLOVAKYA", "FAROE ADALARI", "13.11.2026 22:45", MatchProbability(listOf(85, 88, 84, 87), listOf(10, 7, 13, 10), listOf(5, 4, 3, 3))),
-            TotoMatch(6, 6, "GÜRCİSTAN", "MACARİSTAN", "14.11.2026 20:00", MatchProbability(listOf(42, 40, 26, 33), listOf(28, 26, 29, 30), listOf(30, 32, 45, 37))),
-            TotoMatch(7, 7, "NORVEÇ", "GALLER", "14.11.2026 20:00", MatchProbability(listOf(84, 86, 89, 87), listOf(10, 8, 8, 8), listOf(6, 5, 3, 5))),
-            TotoMatch(8, 8, "PORTEKİZ", "DANİMARKA", "14.11.2026 22:45", MatchProbability(listOf(76, 76, 77, 68), listOf(15, 15, 16, 24), listOf(9, 7, 7, 8))),
-            TotoMatch(9, 9, "İSPANYA", "İTALYA", "15.11.2026 22:45", MatchProbability(listOf(58, 62, 59, 60), listOf(24, 22, 23, 24), listOf(18, 16, 18, 16))),
-            TotoMatch(10, 10, "ALMANYA", "HOLLANDA", "16.11.2026 22:45", MatchProbability(listOf(52, 55, 50, 48), listOf(26, 25, 27, 28), listOf(22, 20, 23, 24))),
-            TotoMatch(11, 11, "İNGİLTERE", "BELÇİKA", "16.11.2026 22:45", MatchProbability(listOf(64, 68, 65, 62), listOf(21, 19, 20, 22), listOf(15, 13, 15, 16))),
-            TotoMatch(12, 12, "HIRVATİSTAN", "POLONYA", "16.11.2026 20:00", MatchProbability(listOf(60, 58, 62, 59), listOf(23, 24, 22, 23), listOf(17, 18, 16, 18))),
-            TotoMatch(13, 13, "İSVEÇ", "İSVİÇRE", "17.11.2026 22:45", MatchProbability(listOf(45, 42, 40, 44), listOf(30, 31, 32, 29), listOf(25, 27, 28, 27))),
-            TotoMatch(14, 14, "AVUSTURYA", "SIRBİSTAN", "17.11.2026 22:45", MatchProbability(listOf(55, 52, 58, 54), listOf(25, 27, 24, 26), listOf(20, 21, 18, 20))),
-            TotoMatch(15, 15, "ÇEKYA", "UKRAYNA", "17.11.2026 22:45", MatchProbability(listOf(48, 50, 47, 49), listOf(28, 27, 29, 28), listOf(24, 23, 24, 23)))
-        )
+        return NetworkModule.createTurkishLeagueSporTotoBulletin().matches.map { it.toDomainTotoMatch() }
     }
 
     private fun createInitialForumPosts(): List<ForumPost> {
+        val m1 = createInitialMatches().getOrNull(0)
+        val m6 = createInitialMatches().getOrNull(5)
+        val m7 = createInitialMatches().getOrNull(6)
         return listOf(
             ForumPost(
                 id = "p1",
                 authorName = "TATAR34",
                 authorTeam = SupportedTeam.ALANYASPOR,
                 authorTitle = "Usta ✨",
-                content = "Neden abi duzmu biter sürpriz olmazmi ?",
+                content = "Bu maçta %${m1?.probability?.home?.firstOrNull() ?: 79} ev sahibi görünüyor ama sürpriz beraberlik (X) de kuponu ayırır.",
                 dateText = "09.11.2026 23:12:47",
-                likesCount = 8
+                likesCount = 8,
+                matchNumber = m1?.matchNumber ?: 1,
+                matchReference = m1?.let { "#${it.matchNumber} ${it.homeTeam} - ${it.awayTeam}" },
+                predictedOutcome = PredictionOutcome.DRAW
             ),
             ForumPost(
                 id = "p2",
                 authorName = "GALATALI34",
                 authorTeam = SupportedTeam.GALATASARAY,
                 authorTitle = "Usta ✨",
-                content = "Bu hafta 15 in verdiği ikramiye ortada... spor toto teşkilatı balina avına çıkmış durumda... yem olursun...",
+                content = "Bu haftanın genel bülteninde devir ihtimali yüksek; en az 3-4 maçta çifte şans (1X / X2) koymak şart.",
                 dateText = "09.11.2026 23:12:07",
                 likesCount = 24
             ),
@@ -736,18 +890,35 @@ class TotoViewModel(
                 authorName = "CUMHURİYET",
                 authorTeam = SupportedTeam.BESIKTAS,
                 authorTitle = "Kral 👑",
-                content = "Girilmez Bence",
+                content = "Yüzdeler birbirine çok yakın, tek geçilmez — 1X2 kapatmak mantıklı duruyor.",
                 dateText = "09.11.2026 23:01:38",
-                likesCount = 12
+                likesCount = 12,
+                matchNumber = m6?.matchNumber ?: 6,
+                matchReference = m6?.let { "#${it.matchNumber} ${it.homeTeam} - ${it.awayTeam}" },
+                predictedOutcome = PredictionOutcome.AWAY
             ),
             ForumPost(
                 id = "p4",
                 authorName = "HUSEYIN_K",
                 authorTeam = SupportedTeam.FENERBAHCE,
                 authorTitle = "Usta",
-                content = "Garantili 14 formülüyle kuponu kurduk! Nesine'ye tek tıkla aktardım, Fransa ve Norveç banko.",
+                content = "Garantili 14 formülüyle kuponu kurduk! Bu maçta banko 1 tarafındayım.",
                 dateText = "09.11.2026 22:45:10",
-                likesCount = 31
+                likesCount = 31,
+                attachedCouponId = "starter_forum_coupon_p4",
+                attachedCouponSummary = "14 Garanti Örnek Kupon (6 Kolon)",
+                attachedCouponFormulaTitle = FormulaType.GUARANTEE_14.title,
+                attachedCouponColumns = listOf(
+                    "111221211212111",
+                    "1X12X12112X21X1",
+                    "11122X21X21211X",
+                    "X11221211212X11",
+                    "11X2212X1212111",
+                    "1X1221211X121X1"
+                ),
+                matchNumber = m7?.matchNumber ?: 7,
+                matchReference = m7?.let { "#${it.matchNumber} ${it.homeTeam} - ${it.awayTeam}" },
+                predictedOutcome = PredictionOutcome.HOME
             )
         )
     }

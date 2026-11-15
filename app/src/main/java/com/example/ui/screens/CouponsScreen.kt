@@ -94,6 +94,7 @@ import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import com.example.ui.theme.VibrantRed
 
+import com.example.model.MatchLiveScore
 import com.example.model.TotoMatch
 import com.example.ui.components.CouponMatrixTableView
 
@@ -102,6 +103,7 @@ fun CouponsScreen(
     coupons: List<Coupon>,
     currentCoupon: Coupon?,
     matches: List<TotoMatch> = emptyList(),
+    liveScores: List<MatchLiveScore> = emptyList(),
     savedCredentials: PlatformCredentials,
     walletBalanceTL: Double,
     onSelectCoupon: (Coupon) -> Unit,
@@ -352,7 +354,7 @@ fun CouponsScreen(
                         fontSize = 15.sp
                     )
                     Text(
-                        text = "Uygulama içi tarayıcıda Nesine'yi açıp kolonları otomatik sırayla işaretleyin (SMS 2FA uyumlu). Bulut otomasyon için aşağıdaki Cloudflare butonunu kullanabilirsiniz.",
+                        text = "Uygulama içi tarayıcıda Nesine'yi açıp tüm kolonları otomatik doldurun ve oynayın (SMS 2FA uyumlu).",
                         color = TextSecondary,
                         fontSize = 11.sp,
                         lineHeight = 16.sp
@@ -403,6 +405,56 @@ fun CouponsScreen(
                                     fontSize = 12.sp
                                 )
                             }
+                        }
+                    }
+
+                    val totalColumnsAcrossCoupons = coupons.sumOf { it.totalColumns }
+                    if (coupons.size > 1 && totalColumnsAcrossCoupons > 0) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        Button(
+                            onClick = {
+                                if (noPlayableBulletin) {
+                                    Toast.makeText(context, effectiveBulletinError, Toast.LENGTH_LONG).show()
+                                } else {
+                                    val combinedColumns = coupons.flatMap { it.columns }.mapIndexed { idx, col ->
+                                        col.copy(index = idx + 1)
+                                    }
+                                    val combinedCoupon = activeCoupon.copy(
+                                        id = "batch_${coupons.size}_coupons",
+                                        title = "Toplu Kupon (${coupons.size} Kupon • $totalColumnsAcrossCoupons Kolon)",
+                                        columns = combinedColumns
+                                    )
+                                    if (onOpenInAppBrowser != null) {
+                                        onOpenInAppBrowser(combinedCoupon, savedCredentials)
+                                    } else {
+                                        onSelectCoupon(combinedCoupon)
+                                        selectedPlatformForPlay = BettingPlatform.NESINE
+                                    }
+                                }
+                            },
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricGreen.copy(alpha = 0.9f)),
+                            shape = RoundedCornerShape(10.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .defaultMinSize(minHeight = 48.dp)
+                                .padding(horizontal = 12.dp)
+                                .testTag("btn_play_all_coupons_batch")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.PlayArrow,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = "Tüm Kuponları Toplu Oyna (${coupons.size} Kupon • $totalColumnsAcrossCoupons Kolon)",
+                                color = Color.Black,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 12.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
                         }
                     }
                 }
@@ -611,42 +663,6 @@ fun CouponsScreen(
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Button(
-                        onClick = {
-                            if (noPlayableBulletin) {
-                                Toast.makeText(context, effectiveBulletinError, Toast.LENGTH_LONG).show()
-                            } else if (!canAfford) {
-                                Toast.makeText(context, "$INSUFFICIENT_BALANCE_ERROR! Cloudflare otomatik oynama için %.2f ₺ gereklidir.".format(activeCoupon.columnFeeTotalTL), Toast.LENGTH_SHORT).show()
-                                onOpenWallet()
-                            } else {
-                                val success = onDeductFeeAndPlay(activeCoupon)
-                                if (success) {
-                                    selectedPlatformForPlay = BettingPlatform.NESINE
-                                } else {
-                                    Toast.makeText(context, INSUFFICIENT_BALANCE_ERROR, Toast.LENGTH_LONG).show()
-                                }
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = Color(0xFF0F2942)
-                        ),
-                        border = androidx.compose.foundation.BorderStroke(1.dp, ElectricCyan.copy(alpha = 0.7f)),
-                        shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp)
-                            .testTag("btn_play_cloudflare_nesine")
-                    ) {
-                        Text(
-                            text = "☁️ Cloudflare Browser Run ile Nesine'de Oyna",
-                            color = ElectricCyan,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 12.5.sp
-                        )
-                    }
-
                     Spacer(modifier = Modifier.height(6.dp))
 
                     Text(
@@ -725,7 +741,7 @@ fun CouponsScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = "Maçlar oynandıkça 15, 14, 13 ikramiye durumunu izle",
+                                text = "Maçlar oynandıkça 15, 14, 13, 12 ikramiye durumunu canlı izle",
                                 color = TextSecondary,
                                 fontSize = 12.sp,
                                 lineHeight = 17.sp
@@ -838,6 +854,7 @@ fun CouponsScreen(
             CouponMatrixTableView(
                 coupon = activeCoupon,
                 matches = matches,
+                liveScores = liveScores,
                 onDeleteCoupon = {
                     onDeleteCoupon(activeCoupon.id)
                 }

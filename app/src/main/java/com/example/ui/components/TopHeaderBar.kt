@@ -74,6 +74,8 @@ fun TopHeaderBar(
     onOpenWallet: () -> Unit = {},
     onLiveClick: () -> Unit = {},
     liveMatchesCount: Int = 0,
+    memberSession: com.example.repository.MemberSessionState = com.example.repository.MemberSessionState(),
+    onOpenAuth: () -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     Surface(
@@ -87,62 +89,116 @@ fun TopHeaderBar(
                 .padding(horizontal = 14.dp, vertical = 7.dp),
             verticalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            // App Brand with VIP Badge
+            // App Brand with VIP / Membership Badge
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.clickable { onProfileClick() }
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Box(
-                    modifier = Modifier
-                        .size(34.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(
-                            Brush.linearGradient(
-                                listOf(CasinoGold, Color(0xFFD97706))
-                            )
-                        ),
-                    contentAlignment = Alignment.Center
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.clickable { onProfileClick() }
                 ) {
-                    Text(
-                        text = "ST",
-                        color = Color.Black,
-                        fontWeight = FontWeight.Black,
-                        fontSize = 15.sp
-                    )
+                    Box(
+                        modifier = Modifier
+                            .size(34.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(
+                                Brush.linearGradient(
+                                    listOf(CasinoGold, Color(0xFFD97706))
+                                )
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "ST",
+                            color = Color.Black,
+                            fontWeight = FontWeight.Black,
+                            fontSize = 15.sp
+                        )
+                    }
+
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Column {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "SPOR TOTO",
+                                color = TextPrimary,
+                                fontWeight = FontWeight.Black,
+                                fontSize = 16.sp,
+                                letterSpacing = 0.5.sp
+                            )
+                            Spacer(modifier = Modifier.width(5.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(CasinoGold.copy(alpha = 0.2f))
+                                    .border(1.dp, CasinoGold, RoundedCornerShape(4.dp))
+                                    .padding(horizontal = 4.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = "VIP",
+                                    color = CasinoGold,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 10.sp
+                                )
+                            }
+                        }
+                        Text(
+                            text = "0.20 ₺ / Kolon Otomasyon",
+                            color = CasinoGoldLight,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
                 }
 
-                Spacer(modifier = Modifier.width(8.dp))
-
-                Column {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = "SPOR TOTO",
-                            color = TextPrimary,
-                            fontWeight = FontWeight.Black,
-                            fontSize = 16.sp,
-                            letterSpacing = 0.5.sp
+                // Member Auth Quick Pill (Google / Apple / Email via Supabase)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(
+                            if (memberSession.isSignedIn) ElectricGreen.copy(alpha = 0.14f)
+                            else ElectricCyan.copy(alpha = 0.14f)
                         )
-                        Spacer(modifier = Modifier.width(5.dp))
-                        Box(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(4.dp))
-                                .background(CasinoGold.copy(alpha = 0.2f))
-                                .border(1.dp, CasinoGold, RoundedCornerShape(4.dp))
-                                .padding(horizontal = 4.dp, vertical = 1.dp)
-                        ) {
-                            Text(
-                                text = "VIP",
-                                color = CasinoGold,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 10.sp
-                            )
+                        .border(
+                            1.dp,
+                            if (memberSession.isSignedIn) ElectricGreen.copy(alpha = 0.7f)
+                            else ElectricCyan.copy(alpha = 0.7f),
+                            RoundedCornerShape(20.dp)
+                        )
+                        .clickable {
+                            if (memberSession.isSignedIn) onProfileClick() else onOpenAuth()
                         }
-                    }
+                        .padding(horizontal = 9.dp, vertical = 5.dp)
+                        .testTag("btn_top_bar_auth")
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(7.dp)
+                            .clip(CircleShape)
+                            .background(if (memberSession.isSignedIn) ElectricGreen else ElectricCyan)
+                    )
+                    Spacer(modifier = Modifier.width(5.dp))
                     Text(
-                        text = "0.20 ₺ / Kolon Otomasyon",
-                        color = CasinoGoldLight,
+                        text = if (memberSession.isSignedIn) {
+                            val name = memberSession.displayName.ifBlank { "Üye" }.take(12)
+                            val tag = when (memberSession.provider.lowercase()) {
+                                "google" -> "G"
+                                "apple" -> "Apple"
+                                else -> "Üye"
+                            }
+                            "$name • $tag"
+                        } else {
+                            "Giriş / Üye Ol"
+                        },
+                        color = if (memberSession.isSignedIn) ElectricGreen else ElectricCyan,
+                        fontWeight = FontWeight.Bold,
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Bold
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
             }

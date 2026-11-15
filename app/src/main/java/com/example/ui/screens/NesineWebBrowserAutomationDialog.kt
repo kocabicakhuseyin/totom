@@ -60,6 +60,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -94,11 +95,16 @@ import com.example.ui.theme.DarkCardBorder
 import com.example.ui.theme.DarkSurface
 import com.example.ui.theme.ElectricCyan
 import com.example.ui.theme.ElectricGreen
+import com.example.ui.theme.NeonAmber
 import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import org.json.JSONObject
+import kotlin.coroutines.resume
 
 @Composable
 fun NesineWebBrowserAutomationDialog(
@@ -182,20 +188,69 @@ fun NesineWebBrowserAutomationContent(
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
-    var pageTitle by remember { mutableStateOf("nesine.com/spor-toto") }
+    var pageTitle by remember { mutableStateOf("nesine.com/sportoto") }
     var loadProgress by remember { mutableIntStateOf(0) }
     var isLoading by remember { mutableStateOf(true) }
     var activeColumnIdx by remember { mutableIntStateOf(0) }
-    var isBatchRunning by remember { mutableStateOf(false) }
+    var isFillAllRunning by remember { mutableStateOf(false) }
+    var isPlayAllRunning by remember { mutableStateOf(false) }
     var isHudExpanded by remember { mutableStateOf(true) }
     var webViewRecreationKey by remember { mutableIntStateOf(0) }
+    var isNesineLoggedIn by remember { mutableStateOf<Boolean?>(null) }
     var automationFeedback by remember {
-        mutableStateOf("Giriş yaptıktan (SMS 2FA dahil) sonra 'Kolonu İşaretle' ile seçimleri aktarabilirsiniz.")
+        mutableStateOf("Oturum kontrol ediliyor... Giriş yaptıktan sonra 'Tümünü Doldur' veya 'Tümünü Oyna' butonunu kullanın.")
     }
 
     val columns = coupon.columns
     val currentColumn = columns.getOrNull(activeColumnIdx)
+
+    val checkSessionNow: (WebView?) -> Unit = { view ->
+        view?.evaluateJavascript(NesineAutoPlayJsInjector.buildSessionCheckScript()) { raw ->
+            val cleaned = raw?.trim('"')?.replace("\\\"", "\"")
+            val json = runCatching { JSONObject(cleaned ?: "{}") }.getOrNull()
+            if (json != null) {
+                val loggedIn = json.optBoolean("loggedIn", false)
+                val needs2fa = json.optBoolean("requires2fa", false)
+                isNesineLoggedIn = loggedIn
+                if (needs2fa) {
+                    automationFeedback = "📲 Nesine SMS doğrulama (2FA) kodu bekleniyor."
+                }
+            }
+        }
+    }
+
+    val triggerNesineLogin: () -> Unit = {
+        val script = NesineAutoPlayJsInjector.buildLoginFillScript(
+            credentials.username,
+            credentials.password,
+            autoSubmit = true
+        )
+        webViewRef?.evaluateJavascript(script) { raw ->
+            val cleaned = raw?.trim('"')?.replace("\\\"", "\"")
+            val json = runCatching { JSONObject(cleaned ?: "{}") }.getOrNull()
+            val reason = json?.optString("reason")
+            val openedModal = json?.optBoolean("openedModal", false) == true
+            automationFeedback = reason?.ifBlank { null }
+                ?: "Giriş formu doldurma komutu gönderildi."
+            if (openedModal && credentials.username.isNotBlank() && credentials.password.isNotBlank()) {
+                scope.launch {
+                    delay(850L)
+                    val fillJs = NesineAutoPlayJsInjector.buildLoginFillScript(
+                        credentials.username,
+                        credentials.password,
+                        autoSubmit = true
+                    )
+                    webViewRef?.evaluateJavascript(fillJs, null)
+                }
+            }
+            scope.launch {
+                delay(1600L)
+                checkSessionNow(webViewRef)
+            }
+        }
+    }
 
     val fitPageScript = remember {
         """
@@ -224,13 +279,31 @@ fun NesineWebBrowserAutomationContent(
         """.trimIndent()
     }
 
+    val evaluateJsJson: suspend (WebView?, String) -> JSONObject? = { view, script ->
+        if (view == null) {
+            null
+        } else {
+            withTimeoutOrNull(8000L) {
+                suspendCancellableCoroutine { cont ->
+                    view.evaluateJavascript(script) { raw ->
+                        val cleaned = raw?.trim('"')?.replace("\\\"", "\"")
+                        val parsed = runCatching { JSONObject(cleaned ?: "{}") }.getOrNull()
+                        if (cont.isActive) cont.resume(parsed)
+                    }
+                }
+            }
+        }
+    }
+
     BackHandler {
-        isBatchRunning = false
+        isFillAllRunning = false
+        isPlayAllRunning = false
         onDismiss()
     }
 
     DisposableEffect(Unit) {
         onDispose {
+            runCatching { CookieManager.getInstance().flush() }
             webViewRef?.apply {
                 stopLoading()
                 destroy()
@@ -239,36 +312,297 @@ fun NesineWebBrowserAutomationContent(
         }
     }
 
-    // Batch execution coroutine when user triggers "Tümünü Sırala"
-    LaunchedEffect(isBatchRunning) {
-        if (isBatchRunning && columns.isNotEmpty()) {
-            for (idx in activeColumnIdx until columns.size) {
-                if (!isBatchRunning) break
+    // Periodic session detection so login badge updates right after user completes 2FA/login
+    LaunchedEffect(webViewRef) {
+        while (true) {
+            delay(2500L)
+            checkSessionNow(webViewRef)
+        }
+    }
+
+    val ensureBulletinReady: suspend (WebView, Boolean) -> Boolean = { view, requireLoggedIn ->
+        var ready = false
+        var abortedByState = false
+        for (attempt in 1..10) {
+            if ((requireLoggedIn && !isPlayAllRunning) || (!requireLoggedIn && !isFillAllRunning && !isPlayAllRunning)) {
+                abortedByState = true
+                break
+            }
+            val sessionJson = evaluateJsJson(view, NesineAutoPlayJsInjector.buildSessionCheckScript())
+            val loggedIn = sessionJson?.optBoolean("loggedIn", false) == true
+            val needs2fa = sessionJson?.optBoolean("requires2fa", false) == true
+            val hasBulletin = sessionJson?.optBoolean("hasBulletin", false) == true
+            val insufficientBalance = sessionJson?.optBoolean("insufficientBalance", false) == true
+            isNesineLoggedIn = loggedIn
+
+            if (insufficientBalance) {
+                automationFeedback = "❌ Nesine hesabınızda bakiye yetersiz görünüyor."
+                abortedByState = true
+                break
+            }
+            if (needs2fa) {
+                automationFeedback = "📲 Nesine SMS doğrulama (2FA) kodu bekleniyor. Kodu girip tekrar deneyin."
+                abortedByState = true
+                break
+            }
+            if (requireLoggedIn && !loggedIn) {
+                automationFeedback = "⚠️ Nesine oturumu kapalı! Giriş penceresi açılıyor..."
+                triggerNesineLogin()
+                abortedByState = true
+                break
+            }
+            if (hasBulletin) {
+                ready = true
+                break
+            }
+
+            automationFeedback = "🔄 Nesine 15 maçlık bülten ekranına geçiliyor... ($attempt/10)"
+            evaluateJsJson(view, NesineAutoPlayJsInjector.buildReturnToBulletinScript())
+            if (attempt == 5) {
+                view.loadUrl(BettingPlatform.NESINE.webUrl)
+            }
+            delay(800L)
+        }
+        if (!ready && !abortedByState) {
+            automationFeedback = "❌ Nesine'de aktif 15 maçlık Spor Toto bülteni bulunamadı."
+        }
+        ready
+    }
+
+    // Full Play-All automation loop: verifies session, returns to bulletin if needed, fills 4-column batches, clicks Hemen Oyna & Onayla
+    LaunchedEffect(isPlayAllRunning) {
+        if (!isPlayAllRunning) return@LaunchedEffect
+        val view = webViewRef
+        if (view == null || columns.isEmpty()) {
+            automationFeedback = "❌ Tarayıcı veya kupon hazır değil."
+            isPlayAllRunning = false
+            return@LaunchedEffect
+        }
+
+        if (!ensureBulletinReady(view, true)) {
+            isPlayAllRunning = false
+            return@LaunchedEffect
+        }
+
+        val totalBatches = (columns.size + 3) / 4
+        var batchIdx = 0
+        var stoppedWithError = false
+
+        var start = 0
+        while (start < columns.size && isPlayAllRunning) {
+            batchIdx++
+            val end = minOf(columns.size, start + 4)
+
+            if (batchIdx > 1 && !ensureBulletinReady(view, true)) {
+                stoppedWithError = true
+                break
+            }
+
+            automationFeedback = "🧹 Grup $batchIdx/$totalBatches temizleniyor..."
+            evaluateJsJson(view, NesineAutoPlayJsInjector.buildClearGridScript())
+            delay(300L)
+            if (!isPlayAllRunning) break
+
+            for (idx in start until end) {
+                if (!isPlayAllRunning) break
                 activeColumnIdx = idx
                 val col = columns[idx]
-                val script = NesineAutoPlayJsInjector.buildColumnFillScript(col)
-                var failedMsg: String? = null
-                webViewRef?.evaluateJavascript(script) { rawResult ->
-                    val cleaned = rawResult?.trim('"')?.replace("\\\"", "\"")
-                    val json = runCatching { JSONObject(cleaned ?: "{}") }.getOrNull()
-                    val ok = json?.optBoolean("success", true) ?: true
-                    val msg = json?.optString("message").orEmpty()
-                    if (!ok) {
-                        failedMsg = msg.ifBlank { "Yeni bülten yüklenmedi" }
-                        automationFeedback = "❌ $failedMsg"
-                        isBatchRunning = false
-                    } else {
-                        automationFeedback = msg.ifBlank { "Kolon #${col.index} JS enjeksiyonu çalıştırıldı." }
+                val slot = idx - start
+                automationFeedback = "🎯 Tümünü Oyna ($batchIdx/$totalBatches): Kolon #${col.index} (${idx + 1}/${columns.size}) işaretleniyor..."
+                val fillRes = evaluateJsJson(
+                    view,
+                    NesineAutoPlayJsInjector.buildColumnFillScript(col, slotIndex = slot)
+                )
+                val ok = fillRes?.optBoolean("success", false) == true
+                if (!ok) {
+                    val errMsg = fillRes?.optString("message").orEmpty().ifBlank { "Kolon #${col.index} işaretlenemedi." }
+                    automationFeedback = "❌ $errMsg"
+                    stoppedWithError = true
+                    break
+                }
+                delay(420L)
+            }
+            if (stoppedWithError || !isPlayAllRunning) break
+
+            delay(400L)
+            automationFeedback = "🚀 Grup $batchIdx/$totalBatches için 'Hemen Oyna' tetikleniyor..."
+            var playRes = evaluateJsJson(view, NesineAutoPlayJsInjector.buildPlayAndConfirmScript())
+            var status = playRes?.optString("status").orEmpty()
+            var msg = playRes?.optString("message").orEmpty()
+
+            if (status == "PLAY_CLICKED" || status == "NO_PLAY_BUTTON") {
+                for (attempt in 1..6) {
+                    if (!isPlayAllRunning) break
+                    automationFeedback = "⏳ Grup $batchIdx/$totalBatches onay ekranı bekleniyor... ($attempt/6)"
+                    delay(850L)
+                    playRes = evaluateJsJson(view, NesineAutoPlayJsInjector.buildPlayAndConfirmScript())
+                    status = playRes?.optString("status").orEmpty()
+                    msg = playRes?.optString("message").orEmpty()
+                    if (status != "PLAY_CLICKED" && status != "NO_PLAY_BUTTON") break
+                }
+            }
+
+            when (status) {
+                "CONFIRMED" -> {
+                    automationFeedback = "✅ Grup $batchIdx/$totalBatches onaylandı! Sonuç kontrol ediliyor..."
+                    delay(1200L)
+                    var postCheck = evaluateJsJson(view, NesineAutoPlayJsInjector.buildSessionCheckScript())
+                    if (postCheck?.optBoolean("hasConfirmView", false) == true &&
+                        postCheck.optBoolean("insufficientBalance", false) != true &&
+                        postCheck.optBoolean("requires2fa", false) != true
+                    ) {
+                        evaluateJsJson(view, NesineAutoPlayJsInjector.buildPlayAndConfirmScript())
+                        delay(1000L)
+                        postCheck = evaluateJsJson(view, NesineAutoPlayJsInjector.buildSessionCheckScript())
+                    }
+                    when {
+                        postCheck?.optBoolean("insufficientBalance", false) == true -> {
+                            automationFeedback = "❌ Nesine hesabınızda bakiye yetersiz görünüyor."
+                            stoppedWithError = true
+                        }
+                        postCheck?.optBoolean("requires2fa", false) == true -> {
+                            automationFeedback = "📲 Nesine SMS doğrulama (2FA) kodu bekleniyor."
+                            stoppedWithError = true
+                        }
+                        else -> {
+                            automationFeedback = "✅ Grup $batchIdx/$totalBatches onaylandı! ($msg)"
+                        }
                     }
                 }
-                delay(1100L)
-                if (!isBatchRunning || failedMsg != null) break
+                "NOT_LOGGED_IN" -> {
+                    isNesineLoggedIn = false
+                    automationFeedback = "⚠️ ${msg.ifBlank { "Oturum kapandı! Tekrar giriş yapın." }}"
+                    stoppedWithError = true
+                }
+                "REQUIRES_2FA" -> {
+                    automationFeedback = "📲 ${msg.ifBlank { "SMS doğrulama (2FA) kodu gerekli." }}"
+                    stoppedWithError = true
+                }
+                "INSUFFICIENT_BALANCE" -> {
+                    automationFeedback = "❌ ${msg.ifBlank { "Nesine hesabınızda bakiye yetersiz." }}"
+                    stoppedWithError = true
+                }
+                else -> {
+                    if (end < columns.size) {
+                        automationFeedback = "⚠️ Grup $batchIdx/$totalBatches için oynama istendi ancak onay butonu doğrulanamadı — ekrandan kontrol edip devam edin."
+                        stoppedWithError = true
+                    } else {
+                        automationFeedback = "🚀 ${msg.ifBlank { "Son grup için oynama talebi gönderildi — Nesine ekranını kontrol edin." }}"
+                    }
+                }
             }
-            if (isBatchRunning) {
-                isBatchRunning = false
-                automationFeedback = "✅ ${columns.size} kolon işleme alındı. Nesine sepetinden son onayı verebilirsiniz."
-            }
+            if (stoppedWithError) break
+            start += 4
         }
+
+        if (!stoppedWithError && isPlayAllRunning) {
+            runCatching { CookieManager.getInstance().flush() }
+            checkSessionNow(view)
+            automationFeedback = "✅ Tümünü Oyna tamamlandı: ${columns.size} kolon ($totalBatches grup) işlendi!"
+        }
+        isPlayAllRunning = false
+    }
+
+    // Full Fill-All automation loop: fills all columns (e.g. 48 columns) automatically across extended DOM slots, cart buttons, or post-confirm slip resets
+    LaunchedEffect(isFillAllRunning) {
+        if (!isFillAllRunning) return@LaunchedEffect
+        val view = webViewRef
+        if (view == null || columns.isEmpty()) {
+            automationFeedback = "❌ Tarayıcı veya kupon hazır değil."
+            isFillAllRunning = false
+            return@LaunchedEffect
+        }
+
+        if (!ensureBulletinReady(view, false)) {
+            isFillAllRunning = false
+            return@LaunchedEffect
+        }
+
+        val totalBatches = (columns.size + 3) / 4
+        var batchIdx = 0
+        var start = 0
+        var stoppedWithError = false
+        var usedExtendedSlots = false
+
+        while (start < columns.size && isFillAllRunning) {
+            batchIdx++
+            val end = minOf(columns.size, start + 4)
+
+            if (!usedExtendedSlots) {
+                automationFeedback = "🧹 Tümünü Doldur ($batchIdx/$totalBatches): Sütunlar hazırlanıyor..."
+                evaluateJsJson(view, NesineAutoPlayJsInjector.buildClearGridScript())
+                delay(280L)
+                if (!isFillAllRunning) break
+            }
+
+            for (idx in start until end) {
+                if (!isFillAllRunning) break
+                activeColumnIdx = idx
+                val col = columns[idx]
+                automationFeedback = "✍️ Tümünü Doldur ($batchIdx/$totalBatches): Kolon #${col.index} (${idx + 1}/${columns.size}) dolduruluyor..."
+                val fillRes = evaluateJsJson(
+                    view,
+                    NesineAutoPlayJsInjector.buildColumnFillAutoSlotScript(col, rawIndex = idx)
+                )
+                val ok = fillRes?.optBoolean("success", false) == true
+                if (fillRes?.optBoolean("usedExtendedSlot", false) == true) {
+                    usedExtendedSlots = true
+                }
+                if (!ok) {
+                    val errMsg = fillRes?.optString("message").orEmpty().ifBlank { "Kolon #${col.index} işaretlenemedi." }
+                    automationFeedback = "❌ $errMsg"
+                    stoppedWithError = true
+                    break
+                }
+                delay(320L)
+            }
+            if (stoppedWithError || !isFillAllRunning) break
+
+            if (end >= columns.size) {
+                break
+            }
+
+            if (usedExtendedSlots) {
+                start += 4
+                continue
+            }
+
+            // Standard 4-column A-D slip: advance via Cart/Add-Slip if available, or watch for slip reset after Onayla
+            val advanceRes = evaluateJsJson(
+                view,
+                NesineAutoPlayJsInjector.buildSlipAdvanceOrStateScript(clickCartOrNewSlip = true)
+            )
+            if (advanceRes?.optBoolean("advancedToCart", false) == true) {
+                automationFeedback = "✅ Grup $batchIdx/$totalBatches eklendi, sonraki 4 kolon dolduruluyor..."
+                delay(850L)
+                start += 4
+                continue
+            }
+
+            val nextEnd = minOf(columns.size, end + 4)
+            automationFeedback = "✅ Kolon ${start + 1}–$end/${columns.size} (A–D) doldu! 'Onayla' yapınca Kolon ${end + 1}–$nextEnd otomatik dolacak."
+            while (isFillAllRunning) {
+                delay(750L)
+                val watchRes = evaluateJsJson(
+                    view,
+                    NesineAutoPlayJsInjector.buildSlipAdvanceOrStateScript(clickCartOrNewSlip = false)
+                )
+                val checkedCount = watchRes?.optInt("checkedCount", 60) ?: 60
+                val hasSuccess = watchRes?.optBoolean("hasSuccessNotice", false) == true
+                if ((checkedCount in 0..9) || hasSuccess) {
+                    automationFeedback = "⏳ Kupon onaylandı/temizlendi! Sonraki 4 kolon (${end + 1}–$nextEnd) dolduruluyor..."
+                    delay(650L)
+                    break
+                }
+            }
+            start += 4
+        }
+
+        if (!stoppedWithError && isFillAllRunning) {
+            activeColumnIdx = columns.lastIndex
+            automationFeedback = "✅ Tüm kolonlar (${columns.size}/${columns.size}) otomatik dolduruldu!"
+        }
+        isFillAllRunning = false
     }
 
     Surface(
@@ -291,7 +625,8 @@ fun NesineWebBrowserAutomationContent(
                     ) {
                         IconButton(
                             onClick = {
-                                isBatchRunning = false
+                                isFillAllRunning = false
+                                isPlayAllRunning = false
                                 onDismiss()
                             },
                             modifier = Modifier
@@ -302,14 +637,44 @@ fun NesineWebBrowserAutomationContent(
                         }
 
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Nesine Tarayıcı Robotu",
-                                color = CasinoGold,
-                                fontWeight = FontWeight.Black,
-                                fontSize = 13.sp,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
-                            )
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = "Nesine Robotu",
+                                    color = CasinoGold,
+                                    fontWeight = FontWeight.Black,
+                                    fontSize = 13.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val sessionBadgeText = when (isNesineLoggedIn) {
+                                    true -> "Oturum Açık"
+                                    false -> "Giriş Yok"
+                                    null -> "Kontrol..."
+                                }
+                                val sessionBadgeColor = when (isNesineLoggedIn) {
+                                    true -> ElectricGreen
+                                    false -> NeonAmber
+                                    null -> TextMuted
+                                }
+                                Box(
+                                    modifier = Modifier
+                                        .clip(RoundedCornerShape(4.dp))
+                                        .background(sessionBadgeColor.copy(alpha = 0.18f))
+                                        .border(0.8.dp, sessionBadgeColor, RoundedCornerShape(4.dp))
+                                        .padding(horizontal = 5.dp, vertical = 1.dp)
+                                ) {
+                                    Text(
+                                        text = sessionBadgeText,
+                                        color = sessionBadgeColor,
+                                        fontSize = 9.5.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 1
+                                    )
+                                }
+                            }
                             Text(
                                 text = pageTitle,
                                 color = TextMuted,
@@ -374,48 +739,37 @@ fun NesineWebBrowserAutomationContent(
                         .background(DarkCard)
                         .border(1.dp, DarkCardBorder)
                         .padding(horizontal = 8.dp, vertical = 6.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Button(
-                        onClick = {
-                            val col = currentColumn ?: return@Button
-                            val script = NesineAutoPlayJsInjector.buildColumnFillScript(col)
-                            webViewRef?.evaluateJavascript(script) { raw ->
-                                val cleaned = raw?.trim('"')?.replace("\\\"", "\"")
-                                val json = runCatching { JSONObject(cleaned ?: "{}") }.getOrNull()
-                                val ok = json?.optBoolean("success", true) ?: true
-                                val msg = json?.optString("message").orEmpty()
-                                if (!ok) {
-                                    automationFeedback = "❌ ${msg.ifBlank { "Yeni bülten yüklenmedi" }}"
-                                } else {
-                                    automationFeedback = msg.ifBlank { "Kolon #${col.index} işaretlendi." }
-                                    if (activeColumnIdx < columns.lastIndex) {
-                                        activeColumnIdx++
-                                    }
-                                }
-                            }
-                        },
-                        enabled = !isBatchRunning && currentColumn != null,
-                        colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
+                        onClick = { isFillAllRunning = !isFillAllRunning },
+                        enabled = !isPlayAllRunning && columns.isNotEmpty(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isFillAllRunning) Color(0xFFDC2626) else CasinoGold
+                        ),
                         shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         modifier = Modifier
-                            .weight(1.3f)
+                            .weight(1f)
                             .heightIn(min = 48.dp)
-                            .testTag("btn_webview_fill_column")
+                            .testTag("btn_webview_fill_all")
                     ) {
                         Icon(
-                            Icons.Default.PlayArrow,
+                            imageVector = if (isFillAllRunning) Icons.Default.Close else Icons.Default.AutoAwesome,
                             contentDescription = null,
-                            tint = Color.Black,
-                            modifier = Modifier.size(17.dp)
+                            tint = if (isFillAllRunning) Color.White else Color.Black,
+                            modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = "Kolonu İşaretle",
-                            color = Color.Black,
-                            fontSize = 12.sp,
+                            text = if (isFillAllRunning) {
+                                "Durdur (Doldur)"
+                            } else {
+                                "Tümünü Doldur (${columns.size})"
+                            },
+                            color = if (isFillAllRunning) Color.White else Color.Black,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Black,
                             maxLines = 1,
                             softWrap = false,
@@ -424,34 +778,87 @@ fun NesineWebBrowserAutomationContent(
                     }
 
                     Button(
-                        onClick = { isBatchRunning = !isBatchRunning },
-                        enabled = currentColumn != null,
+                        onClick = { isPlayAllRunning = !isPlayAllRunning },
+                        enabled = !isFillAllRunning && columns.isNotEmpty(),
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isBatchRunning) Color(0xFFDC2626) else ElectricGreen
+                            containerColor = if (isPlayAllRunning) Color(0xFFDC2626) else ElectricGreen
                         ),
                         shape = RoundedCornerShape(10.dp),
-                        contentPadding = PaddingValues(horizontal = 10.dp, vertical = 8.dp),
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 8.dp),
                         modifier = Modifier
                             .weight(1f)
                             .heightIn(min = 48.dp)
-                            .testTag("btn_webview_batch_fill")
+                            .testTag("btn_webview_play_all")
                     ) {
                         Icon(
-                            Icons.Default.AutoAwesome,
+                            imageVector = if (isPlayAllRunning) Icons.Default.Close else Icons.Default.PlayArrow,
                             contentDescription = null,
-                            tint = if (isBatchRunning) Color.White else Color.Black,
+                            tint = if (isPlayAllRunning) Color.White else Color.Black,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(4.dp))
                         Text(
-                            text = if (isBatchRunning) "Durdur" else "Tümünü Sırala",
-                            color = if (isBatchRunning) Color.White else Color.Black,
-                            fontSize = 11.5.sp,
+                            text = if (isPlayAllRunning) {
+                                "Durdur (Oyna)"
+                            } else {
+                                "Tümünü Oyna (${columns.size})"
+                            },
+                            color = if (isPlayAllRunning) Color.White else Color.Black,
+                            fontSize = 11.sp,
                             fontWeight = FontWeight.Black,
                             maxLines = 1,
                             softWrap = false,
                             overflow = TextOverflow.Ellipsis
                         )
+                    }
+                }
+
+                if (isNesineLoggedIn == false) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(NeonAmber.copy(alpha = 0.14f))
+                            .border(0.8.dp, NeonAmber.copy(alpha = 0.45f))
+                            .padding(horizontal = 10.dp, vertical = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "Nesine oturumu kapalı. Oynamak için giriş yapın:",
+                            color = NeonAmber,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            modifier = Modifier.weight(1f),
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Button(
+                            onClick = triggerNesineLogin,
+                            enabled = !isFillAllRunning && !isPlayAllRunning,
+                            colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier
+                                .heightIn(min = 48.dp)
+                                .testTag("btn_webview_banner_login")
+                        ) {
+                            Icon(
+                                Icons.Default.Key,
+                                contentDescription = null,
+                                tint = Color.Black,
+                                modifier = Modifier.size(15.dp)
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text(
+                                text = "Oturum Aç",
+                                color = Color.Black,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Black,
+                                maxLines = 1,
+                                softWrap = false
+                            )
+                        }
                     }
                 }
 
@@ -482,9 +889,15 @@ fun NesineWebBrowserAutomationContent(
                                         ViewGroup.LayoutParams.MATCH_PARENT,
                                         ViewGroup.LayoutParams.MATCH_PARENT
                                     )
-                                    CookieManager.getInstance().setAcceptCookie(true)
+                                    val cm = CookieManager.getInstance()
+                                    cm.setAcceptCookie(true)
+                                    cm.setAcceptThirdPartyCookies(this, true)
                                     settings.javaScriptEnabled = true
                                     settings.domStorageEnabled = true
+                                    settings.databaseEnabled = true
+                                    settings.javaScriptCanOpenWindowsAutomatically = true
+                                    settings.mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
+                                    settings.userAgentString = settings.userAgentString.replace("; wv)", ")")
                                     settings.useWideViewPort = true
                                     settings.loadWithOverviewMode = true
                                     settings.setSupportZoom(true)
@@ -511,8 +924,11 @@ fun NesineWebBrowserAutomationContent(
 
                                         override fun onPageFinished(view: WebView?, url: String?) {
                                             isLoading = false
+                                            runCatching { CookieManager.getInstance().flush() }
+                                            view?.evaluateJavascript(NesineAutoPlayJsInjector.buildCookieBannerDismissScript(), null)
                                             view?.evaluateJavascript(fitPageScript, null)
                                             view?.requestLayout()
+                                            checkSessionNow(view)
                                         }
 
                                         override fun onRenderProcessGone(
@@ -520,7 +936,8 @@ fun NesineWebBrowserAutomationContent(
                                             detail: RenderProcessGoneDetail?
                                         ): Boolean {
                                             isLoading = false
-                                            isBatchRunning = false
+                                            isFillAllRunning = false
+                                            isPlayAllRunning = false
                                             if (webViewRef === view) {
                                                 webViewRef = null
                                             }
@@ -575,7 +992,7 @@ fun NesineWebBrowserAutomationContent(
                             ) {
                                 IconButton(
                                     onClick = { if (activeColumnIdx > 0) activeColumnIdx-- },
-                                    enabled = activeColumnIdx > 0 && !isBatchRunning,
+                                    enabled = activeColumnIdx > 0 && !isFillAllRunning && !isPlayAllRunning,
                                     modifier = Modifier.size(48.dp)
                                 ) {
                                     Icon(
@@ -609,7 +1026,7 @@ fun NesineWebBrowserAutomationContent(
 
                                 IconButton(
                                     onClick = { if (activeColumnIdx < columns.lastIndex) activeColumnIdx++ },
-                                    enabled = activeColumnIdx < columns.lastIndex && !isBatchRunning,
+                                    enabled = activeColumnIdx < columns.lastIndex && !isFillAllRunning && !isPlayAllRunning,
                                     modifier = Modifier.size(48.dp)
                                 ) {
                                     Icon(
@@ -642,21 +1059,8 @@ fun NesineWebBrowserAutomationContent(
                                 }
 
                                 OutlinedButton(
-                                    onClick = {
-                                        val script = NesineAutoPlayJsInjector.buildLoginFillScript(
-                                            credentials.username,
-                                            credentials.password
-                                        )
-                                        webViewRef?.evaluateJavascript(script) { raw ->
-                                            val cleaned = raw?.trim('"')?.replace("\\\"", "\"")
-                                            val reason = runCatching {
-                                                JSONObject(cleaned ?: "{}").optString("reason")
-                                            }.getOrNull()
-                                            automationFeedback = reason?.ifBlank { null }
-                                                ?: "Giriş formu doldurma komutu gönderildi."
-                                        }
-                                    },
-                                    enabled = !isBatchRunning,
+                                    onClick = triggerNesineLogin,
+                                    enabled = !isFillAllRunning && !isPlayAllRunning,
                                     shape = RoundedCornerShape(10.dp),
                                     contentPadding = PaddingValues(horizontal = 10.dp, vertical = 6.dp),
                                     modifier = Modifier

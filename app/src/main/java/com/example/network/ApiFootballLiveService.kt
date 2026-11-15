@@ -14,6 +14,23 @@ interface ApiFootballLiveService {
         @Header("x-apisports-key") apiKey: String,
         @Query("live") live: String = "all"
     ): Response<ApiFootballLiveResponse>
+
+    @GET("fixtures")
+    suspend fun getFixturesByDate(
+        @Header("x-apisports-key") apiKey: String,
+        @Query("date") date: String,
+        @Query("timezone") timezone: String = "Europe/Istanbul"
+    ): Response<ApiFootballLiveResponse> = Response.success(ApiFootballLiveResponse())
+
+    @GET("fixtures")
+    suspend fun getFixturesByLeague(
+        @Header("x-apisports-key") apiKey: String,
+        @Query("league") leagueId: Int,
+        @Query("season") season: Int,
+        @Query("from") fromDate: String? = null,
+        @Query("to") toDate: String? = null,
+        @Query("timezone") timezone: String = "Europe/Istanbul"
+    ): Response<ApiFootballLiveResponse> = Response.success(ApiFootballLiveResponse())
 }
 
 @JsonClass(generateAdapter = true)
@@ -57,4 +74,9 @@ data class ApiFootballTeam(val name: String)
 data class ApiFootballGoals(val home: Int? = null, val away: Int? = null)
 
 @JsonClass(generateAdapter = true)
-data class ApiFootballLeague(val name: String? = null)
+data class ApiFootballLeague(
+    val name: String? = null,
+    val id: Int? = null,
+    val country: String? = null,
+    val round: String? = null
+)

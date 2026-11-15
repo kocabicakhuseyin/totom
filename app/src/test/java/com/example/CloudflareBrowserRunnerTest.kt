@@ -96,10 +96,69 @@ class CloudflareBrowserRunnerTest {
         val loginJs = NesineAutoPlayJsInjector.buildLoginFillScript("user'test", "pass\"123")
         assertTrue(loginJs.contains("user'test"))
         assertTrue(loginJs.contains("pass\\\"123"))
+        assertTrue(loginJs.contains("if (true &&"))
+
+        val loginNoSubmitJs = NesineAutoPlayJsInjector.buildLoginFillScript("u", "p", autoSubmit = false)
+        assertTrue(loginNoSubmitJs.contains("if (false &&"))
 
         val colJs = NesineAutoPlayJsInjector.buildColumnFillScript(sampleCoupon().columns.first())
         assertTrue(colJs.contains("[\"1\",\"X\",\"2\""))
         assertTrue(colJs.contains("Kolon #1"))
+        assertTrue(colJs.contains("m-c-\" + m + \"-0-"))
+
+        val colSlot3Js = NesineAutoPlayJsInjector.buildColumnFillScript(sampleCoupon().columns[1], slotIndex = 3)
+        assertTrue(colSlot3Js.contains("m-c-\" + m + \"-3-"))
+        assertTrue(colSlot3Js.contains("Sütun 4"))
+    }
+
+    @Test
+    fun testJsInjectorGeneratesSessionCheckAndPlayConfirmScripts() {
+        val cookieJs = NesineAutoPlayJsInjector.buildCookieBannerDismissScript()
+        assertTrue(cookieJs.contains("kabul et"))
+        assertTrue(cookieJs.contains("onetrust-accept-btn-handler"))
+
+        val sessionJs = NesineAutoPlayJsInjector.buildSessionCheckScript()
+        assertTrue(sessionJs.contains("loggedIn"))
+        assertTrue(sessionJs.contains("requires2fa"))
+        assertTrue(sessionJs.contains("hasBulletin"))
+        assertTrue(sessionJs.contains("hasConfirmView"))
+        assertTrue(sessionJs.contains("hasReceiptView"))
+        assertTrue(sessionJs.contains("insufficientBalance"))
+        assertTrue(sessionJs.contains("hesabım"))
+        assertTrue(sessionJs.contains("giriş yap"))
+        assertTrue(sessionJs.contains("üye ol"))
+
+        val returnJs = NesineAutoPlayJsInjector.buildReturnToBulletinScript()
+        assertTrue(returnJs.contains("CLICKED_NEW_COUPON"))
+        assertTrue(returnJs.contains("CLICKED_BACK_FROM_CONFIRM"))
+        assertTrue(returnJs.contains("yeni kupon"))
+
+        val clearJs = NesineAutoPlayJsInjector.buildClearGridScript()
+        assertTrue(clearJs.contains("slot < 4"))
+        assertTrue(clearJs.contains("m < 15"))
+        assertTrue(clearJs.contains("m-c-"))
+
+        val playJs = NesineAutoPlayJsInjector.buildPlayAndConfirmScript()
+        assertTrue(playJs.contains("NOT_LOGGED_IN"))
+        assertTrue(playJs.contains("REQUIRES_2FA"))
+        assertTrue(playJs.contains("CONFIRMED"))
+        assertTrue(playJs.contains("PLAY_CLICKED"))
+        assertTrue(playJs.contains("kuponu onayla"))
+        assertTrue(playJs.contains("hemen oyna"))
+        assertTrue(playJs.contains("Kupon onayı tıklandı"))
+
+        val autoSlot48Js = NesineAutoPlayJsInjector.buildColumnFillAutoSlotScript(
+            column = sampleCoupon().columns.first(),
+            rawIndex = 47
+        )
+        assertTrue(autoSlot48Js.contains("m-c-0-47-0"))
+        assertTrue(autoSlot48Js.contains("var targetSlot = hasExtended ? 47 : 3;"))
+        assertTrue(autoSlot48Js.contains("usedExtendedSlot"))
+
+        val advanceJs = NesineAutoPlayJsInjector.buildSlipAdvanceOrStateScript(clickCartOrNewSlip = true)
+        assertTrue(advanceJs.contains("sepete ekle"))
+        assertTrue(advanceJs.contains("checkedCount"))
+        assertTrue(advanceJs.contains("hasSuccessNotice"))
     }
 
     @Test
@@ -234,5 +293,49 @@ class CloudflareBrowserRunnerTest {
         assertFalse(CloudflareBrowserRunner.isWorkerConfigured("https://dash.cloudflare.com/123/workers"))
         assertFalse(CloudflareBrowserRunner.isWorkerConfigured("not a url"))
         assertFalse(CloudflareBrowserRunner.isWorkerConfigured("   "))
+    }
+
+    @Test
+    fun testLegacyUnverifiedWorkerCompletedIsFlaggedAsLoginRequiredWhenNotDryRun() {
+        runBlocking {
+            val server = com.sun.net.httpserver.HttpServer.create(java.net.InetSocketAddress("127.0.0.1", 0), 0)
+            var responseBody = """{"success":true,"status":"COMPLETED","playedColumnsCount":1,"steps":["3/5 '123' hesabı ile giriş kontrol ediliyor...","1 kolon işaretlendi."]}"""
+            server.createContext("/") { exchange ->
+                val bytes = responseBody.toByteArray(Charsets.UTF_8)
+                exchange.responseHeaders.add("Content-Type", "application/json")
+                exchange.sendResponseHeaders(200, bytes.size.toLong())
+                exchange.responseBody.use { it.write(bytes) }
+            }
+            server.start()
+            try {
+                val url = "http://127.0.0.1:${server.address.port}/"
+                val coupon = sampleCoupon()
+                val creds = PlatformCredentials(BettingPlatform.NESINE, "u", "p")
+
+                // Old unverified worker with dryRun=false must NOT falsely report COMPLETED
+                val unverifiedRes = CloudflareBrowserRunner.runNesineAutoPlayWorker(
+                    coupon = coupon, credentials = creds, dryRun = false, workerUrl = url, apiToken = "tok"
+                )
+                assertEquals(CloudflareRunStatus.LOGIN_FAILED, unverifiedRes.status)
+                assertTrue(unverifiedRes.errorMessage.orEmpty().contains("WebView"))
+
+                // DryRun preview with same response stays COMPLETED
+                val previewRes = CloudflareBrowserRunner.runNesineAutoPlayWorker(
+                    coupon = coupon, credentials = creds, dryRun = true, workerUrl = url, apiToken = "tok"
+                )
+                assertEquals(CloudflareRunStatus.COMPLETED, previewRes.status)
+
+                // Updated worker with sessionVerified=true and playConfirmed=true reports COMPLETED
+                responseBody = """{"success":true,"status":"COMPLETED","playedColumnsCount":1,"sessionVerified":true,"playConfirmed":true,"steps":["✅ Nesine oynama onayı verildi (Onayla)."]}"""
+                val verifiedRes = CloudflareBrowserRunner.runNesineAutoPlayWorker(
+                    coupon = coupon, credentials = creds, dryRun = false, workerUrl = url, apiToken = "tok"
+                )
+                assertEquals(CloudflareRunStatus.COMPLETED, verifiedRes.status)
+                assertEquals(true, verifiedRes.sessionVerified)
+                assertEquals(true, verifiedRes.playConfirmed)
+            } finally {
+                server.stop(0)
+            }
+        }
     }
 }

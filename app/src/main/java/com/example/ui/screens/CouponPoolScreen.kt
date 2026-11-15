@@ -19,7 +19,6 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
@@ -45,8 +44,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -70,6 +67,7 @@ import com.example.ui.theme.TextMuted
 import com.example.ui.theme.TextPrimary
 import com.example.ui.theme.TextSecondary
 import kotlinx.coroutines.delay
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 
 /**
@@ -93,10 +91,11 @@ fun CouponPoolScreen(
     val receiptArchive = remember(context) { NesineReceiptArchive(context) }
     var archivedReceipts by remember { mutableStateOf(receiptArchive.list()) }
     var showArchive by remember { mutableStateOf(false) }
-    var signedIn by remember { mutableStateOf(repository.hasSession) }
-    var email by remember { mutableStateOf("") }
-    var password by remember { mutableStateOf("") }
-    var nickname by remember { mutableStateOf("") }
+    val sessionState by repository.sessionState.collectAsStateWithLifecycle()
+    val signedIn = sessionState.isSignedIn
+    var nickname by remember(sessionState.displayName, displayUsername) {
+        mutableStateOf(sessionState.displayName.ifBlank { displayUsername })
+    }
     var sharingConsent by remember { mutableStateOf(false) }
     var selectedId by remember { mutableStateOf(coupons.firstOrNull()?.id.orEmpty()) }
     var entries by remember { mutableStateOf<List<PoolCouponDto>>(emptyList()) }
@@ -292,56 +291,12 @@ fun CouponPoolScreen(
 
         if (!signedIn) {
             item {
-                PoolCard {
-                    Text("Üye girişi", color = TextPrimary, fontWeight = FontWeight.Bold, fontSize = 16.sp)
-                    Text("Gerçek üyelerin paylaştığı kolonları görüntülemek için e-posta hesabınızla giriş yapın.", color = TextSecondary, fontSize = 12.sp)
-                    OutlinedTextField(
-                        value = email, onValueChange = { email = it.take(160) },
-                        label = { Text("E-posta") }, singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = password, onValueChange = { password = it },
-                        label = { Text("Şifre (en az 6 karakter)") }, singleLine = true,
-                        visualTransformation = PasswordVisualTransformation(),
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password),
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            enabled = !loading,
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    repository.signIn(email, password)
-                                        .onSuccess { signedIn = true; password = ""; message = "Giriş başarılı." }
-                                        .onFailure { message = it.message.orEmpty() }
-                                    loading = false
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) { Text("Giriş") }
-                        Button(
-                            enabled = !loading,
-                            onClick = {
-                                scope.launch {
-                                    loading = true
-                                    repository.register(email, password)
-                                        .onSuccess { active ->
-                                            signedIn = active
-                                            password = ""
-                                            message = if (active) "Kayıt tamamlandı." else "E-postanıza gelen doğrulama bağlantısını açıp giriş yapın."
-                                        }
-                                        .onFailure { message = it.message.orEmpty() }
-                                    loading = false
-                                }
-                            },
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = CasinoGold, contentColor = Color.Black)
-                        ) { Text("Kayıt ol") }
-                    }
-                }
+                SupabaseAuthCard(
+                    repository = repository,
+                    title = "Üye Girişi (Google / Apple ID / E-posta)",
+                    subtitle = "Gerçek üyelerin paylaştığı kolonları görüntülemek ve kupon paylaşmak için giriş yapın.",
+                    onAuthCompleted = { message = "Üye girişi başarılı." }
+                )
             }
         } else {
             item {
@@ -401,8 +356,15 @@ fun CouponPoolScreen(
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = CasinoGold, contentColor = Color.Black)
                     ) { Text("Onaylı kuponu havuza ekle") }
-                    Button(onClick = { repository.signOut(); signedIn = false; message = "Çıkış yapıldı." },
-                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF283346))) {
+                    Button(
+                        onClick = {
+                            scope.launch {
+                                repository.signOutAsync()
+                                message = "Çıkış yapıldı."
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF283346))
+                    ) {
                         Text("Üye çıkışı")
                     }
                 }

@@ -7,7 +7,8 @@ import java.util.concurrent.TimeUnit
 
 /** The publishable key is intentionally public; RLS protects member data. */
 object PoolNetworkModule {
-    private const val BASE_URL = "https://fmmszozzbylbqulhfrln.supabase.co/"
+    const val SUPABASE_URL = "https://fmmszozzbylbqulhfrln.supabase.co"
+    private const val BASE_URL = "$SUPABASE_URL/"
     const val PUBLISHABLE_KEY = "sb_publishable_LIeFCfNieoM_Hq69fcfM5w_MsrBtUB9"
 
     val service: PoolApiService by lazy {

@@ -73,6 +73,8 @@ fun DashboardScreen(
     onOpenExcelImportDialog: () -> Unit,
     onOpenWizardDialog: () -> Unit,
     onOpenWallet: () -> Unit = {},
+    jackpotEstimateTL: Double = 0.0,
+    weekNumber: Int? = null,
     modifier: Modifier = Modifier
 ) {
     val scrollState = rememberScrollState()
@@ -87,6 +89,8 @@ fun DashboardScreen(
     ) {
         // 1. HERO JACKPOT CASINO CARD
         HeroJackpotCard(
+            jackpotEstimateTL = jackpotEstimateTL,
+            weekNumber = weekNumber,
             onQuickPlay = { onNavigateTab(AppNavTab.ANALYSIS) }
         )
 
@@ -376,8 +380,15 @@ private fun GuaranteeTierCard(
 
 @Composable
 private fun HeroJackpotCard(
+    jackpotEstimateTL: Double = 0.0,
+    weekNumber: Int? = null,
     onQuickPlay: () -> Unit
 ) {
+    val formattedJackpot = if (jackpotEstimateTL <= 0.0) {
+        "0 ₺"
+    } else {
+        "${java.text.NumberFormat.getIntegerInstance(java.util.Locale("tr", "TR")).format(jackpotEstimateTL.toLong())} ₺"
+    }
     val gradient = Brush.linearGradient(
         colors = listOf(
             Color(0xFF261905),
@@ -414,7 +425,7 @@ private fun HeroJackpotCard(
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     ) {
                         Text(
-                            text = "38. HAFTA CANLI BÜLTEN",
+                            text = weekNumber?.let { "$it. HAFTA CANLI BÜLTEN" } ?: "CANLI BÜLTEN",
                             color = CasinoGoldLight,
                             fontWeight = FontWeight.Black,
                             fontSize = 11.sp
@@ -447,7 +458,7 @@ private fun HeroJackpotCard(
                 )
 
                 Text(
-                    text = "45.000.000 ₺",
+                    text = formattedJackpot,
                     color = CasinoGoldLight,
                     fontWeight = FontWeight.Black,
                     fontSize = 30.sp,

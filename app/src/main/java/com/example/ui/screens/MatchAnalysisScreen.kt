@@ -3,6 +3,7 @@ package com.example.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -101,6 +102,15 @@ fun MatchAnalysisScreen(
     onApplyFilterProfile: (FilterProfileType) -> Unit = {},
     isRefreshing: Boolean = false,
     onRefreshBulletin: () -> Unit = {},
+    onSyncTurkishLeagueBulletin: () -> Unit = {},
+    previousWeekReport: com.example.network.model.PreviousWeekBulletinReport? = null,
+    isLoadingPreviousWeek: Boolean = false,
+    previousWeekError: String? = null,
+    hasApiKey: Boolean = false,
+    requiresApiKey: Boolean = false,
+    providerLabel: String = "ESPN",
+    onLoadPreviousWeek: (Boolean) -> Unit = {},
+    onNavigateToLiveTab: () -> Unit = {},
     favoritedMatchNumbers: Set<Int> = emptySet(),
     onToggleFavorite: (Int) -> Unit = {},
     hasPlayableBulletin: Boolean = true,
@@ -111,6 +121,7 @@ fun MatchAnalysisScreen(
     val totalSelectedMatches = matches.count { it.selections.isNotEmpty() }
     val noPlayableBulletin = !hasPlayableBulletin || bulletinError != null || matches.size < 15
     var showAdvancedTools by remember { mutableStateOf(false) }
+    var showPreviousWeekDialog by remember { mutableStateOf(false) }
 
     Column(
         modifier = modifier
@@ -127,8 +138,9 @@ fun MatchAnalysisScreen(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
                     .padding(horizontal = 14.dp, vertical = 6.dp),
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 FilterChip(
@@ -151,7 +163,55 @@ fun MatchAnalysisScreen(
                         selected = false,
                         borderColor = ElectricCyan
                     ),
-                    modifier = Modifier.testTag("chip_refresh_bulletin")
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("chip_refresh_bulletin")
+                )
+                FilterChip(
+                    selected = false,
+                    enabled = !isRefreshing,
+                    onClick = onSyncTurkishLeagueBulletin,
+                    label = {
+                        Text(
+                            if (isRefreshing) "Çekiliyor..." else "🇹🇷 Türkiye Ligi (API)",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = Color(0xFF064E3B),
+                        labelColor = ElectricGreen
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = !isRefreshing,
+                        selected = false,
+                        borderColor = ElectricGreen
+                    ),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("btn_sync_turkish_league_bulletin")
+                )
+                FilterChip(
+                    selected = false,
+                    onClick = {
+                        showPreviousWeekDialog = true
+                        onLoadPreviousWeek(false)
+                    },
+                    label = {
+                        Text("📅 Geçen Hafta", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    },
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = DarkCard,
+                        labelColor = CasinoGold
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = false,
+                        borderColor = CasinoGold
+                    ),
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("chip_previous_week_bulletin")
                 )
                 FilterChip(
                     selected = false,
@@ -168,9 +228,25 @@ fun MatchAnalysisScreen(
                         selected = false,
                         borderColor = DarkCardBorder
                     ),
-                    modifier = Modifier.testTag("chip_more_bulletin_tools")
+                    modifier = Modifier
+                        .heightIn(min = 48.dp)
+                        .testTag("chip_more_bulletin_tools")
                 )
             }
+        }
+
+        if (showPreviousWeekDialog) {
+            PreviousWeekBulletinDialog(
+                report = previousWeekReport,
+                isLoading = isLoadingPreviousWeek,
+                errorMessage = previousWeekError,
+                hasApiKey = hasApiKey,
+                requiresApiKey = requiresApiKey,
+                providerLabel = providerLabel,
+                onRefresh = { onLoadPreviousWeek(true) },
+                onNavigateToLiveTab = onNavigateToLiveTab,
+                onDismiss = { showPreviousWeekDialog = false }
+            )
         }
 
         if (showAdvancedTools) {

@@ -404,7 +404,7 @@ private fun NesineCloudflareAutoPlayDialog(
     var password by remember { mutableStateOf(savedCredentials.password) }
     var passwordVisible by remember { mutableStateOf(false) }
     var rememberMe by remember { mutableStateOf(savedCredentials.isRemembered) }
-    var dryRun by remember { mutableStateOf(true) }
+    var dryRun by remember { mutableStateOf(false) }
 
     var isRunning by remember { mutableStateOf(false) }
     var elapsedSeconds by remember { mutableIntStateOf(0) }
@@ -819,17 +819,21 @@ private fun NesineCloudflareAutoPlayDialog(
                                 workerResult = res
                                 statusMessage = when (res.status) {
                                     CloudflareRunStatus.COMPLETED ->
-                                        "✅ Cloudflare tamamlandı: ${res.playedColumnsCount} kolon işlendi."
+                                        if (dryRun) {
+                                            "✅ Önizleme tamamlandı: ${res.playedColumnsCount} kolon işaretlendi."
+                                        } else {
+                                            "✅ Cloudflare tamamlandı: ${res.playedColumnsCount} kolon oynandı."
+                                        }
                                     CloudflareRunStatus.NO_BULLETIN ->
                                         "❌ ${res.errorMessage?.takeIf { it.isNotBlank() } ?: "Yeni bülten yüklenmedi"}"
                                     CloudflareRunStatus.INSUFFICIENT_BALANCE ->
                                         "❌ ${res.errorMessage?.takeIf { it.isNotBlank() } ?: "Bakiye yetersiz"}"
                                     CloudflareRunStatus.REQUIRES_2FA ->
-                                        "📲 SMS (2FA) doğrulaması gerekli. WebView robotuyla devam edebilirsiniz."
+                                        "📲 ${res.errorMessage?.takeIf { it.isNotBlank() } ?: "SMS (2FA) doğrulaması gerekli. WebView robotuyla devam edebilirsiniz."}"
                                     CloudflareRunStatus.WAF_BLOCKED ->
                                         "🛡️ Nesine WAF engeli algılandı. Uygulama içi WebView robotunu deneyin."
                                     CloudflareRunStatus.LOGIN_FAILED ->
-                                        "❌ Nesine girişi başarısız oldu."
+                                        "❌ ${res.errorMessage?.takeIf { it.isNotBlank() } ?: "Nesine oturumu açılamadı. WebView robotundan giriş yapıp onaylayın."}"
                                     CloudflareRunStatus.NOT_CONFIGURED ->
                                         res.errorMessage ?: "Cloudflare Worker yapılandırılmamış."
                                     CloudflareRunStatus.ERROR ->
@@ -924,12 +928,15 @@ private fun NesineCloudflareAutoPlayDialog(
                     Text("Cloudflare Canlı Sayfa Önizle (/screenshot)", color = CasinoGold, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
                 }
 
-                OutlinedButton(
+                Button(
                     onClick = {
                         activeJob?.cancel()
                         activeJob = null
                         isRunning = false
                         val creds = PlatformCredentials(BettingPlatform.NESINE, username, password, rememberMe)
+                        if (rememberMe && username.isNotBlank()) {
+                            onSaveCredentials(creds)
+                        }
                         if (onOpenInAppBrowser != null) {
                             onDismiss()
                             onOpenInAppBrowser(coupon, creds)
@@ -938,16 +945,16 @@ private fun NesineCloudflareAutoPlayDialog(
                         }
                     },
                     enabled = true,
+                    colors = ButtonDefaults.buttonColors(containerColor = ElectricGreen),
                     shape = RoundedCornerShape(10.dp),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, ElectricGreen.copy(alpha = 0.6f)),
                     modifier = Modifier
                         .fillMaxWidth()
                         .heightIn(min = 48.dp)
                         .testTag("btn_open_nesine_webview_fallback")
                 ) {
-                    Icon(Icons.Default.Language, contentDescription = null, tint = ElectricGreen, modifier = Modifier.size(17.dp))
+                    Icon(Icons.Default.Language, contentDescription = null, tint = Color.Black, modifier = Modifier.size(17.dp))
                     Spacer(modifier = Modifier.width(6.dp))
-                    Text("Uygulama İçi Tarayıcı Robotu (WebView)", color = ElectricGreen, fontWeight = FontWeight.Bold, fontSize = 11.5.sp)
+                    Text("WebView ile Oturum Aç & Oyna (SMS Destekli)", color = Color.Black, fontWeight = FontWeight.Black, fontSize = 11.5.sp)
                 }
 
                 // 5. Execution Console Log & Result Preview

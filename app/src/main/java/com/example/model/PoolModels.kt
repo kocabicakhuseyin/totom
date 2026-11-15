@@ -58,7 +58,107 @@ object CouponPoolEvaluator {
         "izlanda" to "iceland", "norvec" to "norway", "galler" to "wales",
         "azerbaycan" to "azerbaijan", "lihtenstayn" to "liechtenstein",
         "luksemburg" to "luxembourg", "faroe adalari" to "faroe islands",
-        "slovakya" to "slovakia", "avusturya" to "austria"
+        "slovakya" to "slovakia", "avusturya" to "austria",
+        "bulgaristan" to "bulgaria", "cekya" to "czechia",
+        "czech republic" to "czechia", "ukrayna" to "ukraine",
+        "yunanistan" to "greece", "romanya" to "romania",
+        "iskocya" to "scotland", "irlanda" to "ireland",
+        "kuzey irlanda" to "northern ireland", "finlandiya" to "finland",
+        "slovenya" to "slovenia", "bosna hersek" to "bosnia and herzegovina",
+        "bosnia herzegovina" to "bosnia and herzegovina",
+        "arnavutluk" to "albania", "karadag" to "montenegro",
+        "kuzey makedonya" to "north macedonia", "makedonya" to "north macedonia",
+        "kosova" to "kosovo", "rusya" to "russia",
+        "brezilya" to "brazil", "arjantin" to "argentina",
+        "istanbul basaksehir" to "basaksehir",
+        "rams basaksehir" to "basaksehir",
+        "basaksehir" to "basaksehir",
+        "caykur rizespor" to "rizespor",
+        "fatih karagumruk" to "karagumruk",
+        "gaziantep fk" to "gaziantep",
+        "gazisehir gaziantep" to "gaziantep",
+        "gaziantep bb" to "gaziantep",
+        "mke ankaragucu" to "ankaragucu",
+        "kasimpasa sk" to "kasimpasa",
+        "besiktas jk" to "besiktas",
+        "fenerbahce sk" to "fenerbahce",
+        "galatasaray sk" to "galatasaray",
+        "trabzonspor as" to "trabzonspor",
+        "amed sportif faaliyetler" to "amed",
+        "amed sk" to "amed",
+        "amedspor" to "amed",
+        "erzurumspor" to "erzurum bb",
+        "bb erzurumspor" to "erzurum bb",
+        "erzurum bb" to "erzurum bb",
+        "corum fk" to "corum",
+        "corumspor" to "corum",
+        "corum belediyespor" to "corum",
+        "genclerbirligi" to "genclerbirligi",
+        "kocaelispor" to "kocaelispor",
+        "eyupspor" to "eyupspor",
+        "samsunspor" to "samsunspor",
+        "goztepe" to "goztepe",
+        "alanyaspor" to "alanyaspor",
+        "konyaspor" to "konyaspor",
+        "antalyaspor" to "antalyaspor",
+        "kayserispor" to "kayserispor",
+        "sivasspor" to "sivasspor",
+        "hatayspor" to "hatayspor",
+        "adana demirspor" to "adana demirspor",
+        "bodrum" to "bodrumspor",
+        "bodrumspor" to "bodrumspor",
+        "sakaryaspor" to "sakaryaspor",
+        "pendikspor" to "pendikspor",
+        "bandirmaspor" to "bandirmaspor",
+        "boluspor" to "boluspor",
+        "umraniyespor" to "umraniyespor",
+        "manisa" to "manisa fk",
+        "manisa fk" to "manisa fk",
+        "ankara keciorengucu" to "keciorengucu",
+        "keciorengucu" to "keciorengucu",
+        "igdir" to "igdir fk",
+        "igdir fk" to "igdir fk",
+        "esenler erokspor" to "erokspor",
+        "bayern munih" to "bayern munich",
+        "vfb stuttgart" to "stuttgart",
+        "fc schalke 04" to "schalke 04",
+        "losc lille" to "lille",
+        "olympique lyonnais" to "lyon",
+        "olympique lyon" to "lyon",
+        "newcastle united" to "newcastle",
+        "man city" to "manchester city",
+        "man united" to "manchester united",
+        "man utd" to "manchester united",
+        "inter milan" to "inter",
+        "internazionale" to "inter",
+        "ac milan" to "milan",
+        "paris sg" to "paris saint germain",
+        "psg" to "paris saint germain",
+        "athletic bilbao" to "athletic club",
+        "fc bayern munich" to "bayern munich",
+        "fc bayern munchen" to "bayern munich",
+        "atletico de madrid" to "atletico madrid",
+        "as monaco" to "monaco",
+        "stade rennais" to "rennes",
+        "borussia dortmund" to "dortmund",
+        "bayer leverkusen" to "leverkusen",
+        "rb leipzig" to "leipzig",
+        "tottenham hotspur" to "tottenham",
+        "wolverhampton wanderers" to "wolves",
+        "west ham united" to "west ham",
+        "brighton and hove albion" to "brighton"
+    )
+
+    private val clubSponsorPrefixes = setOf(
+        "rams", "tumosan", "corendon", "yukatel", "ikas", "sipay", "bellona",
+        "onvo", "atakas", "bitexen", "mondihome", "mke", "caykur", "net", "global",
+        "ems", "yapi", "siltaas", "tuzla", "central", "hospital", "solwie", "energy",
+        "trendyol"
+    )
+
+    private val clubCorporateSuffixes = setOf(
+        "a", "s", "as", "sk", "fk", "jk", "sfk", "fc", "cf", "futbol", "kulubu",
+        "sportif", "faaliyetler"
     )
 
     fun maskedName(nickname: String): String {
@@ -73,6 +173,31 @@ object CouponPoolEvaluator {
         .sortedBy { it.matchNumber }
         .take(15)
         .map { "${it.homeTeam}|${it.awayTeam}|${it.matchDate}" }
+
+    fun resolveBulletinScores(matches: List<TotoMatch>, liveScores: List<MatchLiveScore>): List<MatchLiveScore?> {
+        if (matches.isEmpty()) return emptyList()
+        val ordered = matches.sortedBy { it.matchNumber }.take(15)
+        return resolveScores(matchLabels(ordered), liveScores)
+    }
+
+    /**
+     * Filters raw provider scores down to ONLY fixtures present in the Spor Toto bulletin
+     * (including live, half-time, and finished matches), aligned by bulletin matchNumber (1..15).
+     */
+    fun filterAndAlignToBulletin(
+        matches: List<TotoMatch>,
+        liveScores: List<MatchLiveScore>
+    ): List<MatchLiveScore> {
+        if (matches.isEmpty()) return emptyList()
+        val ordered = matches.sortedBy { it.matchNumber }.take(15)
+        val matched = resolveBulletinScores(ordered, liveScores)
+        return ordered.mapIndexedNotNull { idx, totoMatch ->
+            matched.getOrNull(idx)?.copy(matchNumber = totoMatch.matchNumber)
+        }.sortedWith(
+            compareByDescending<MatchLiveScore> { it.isLive }
+                .thenBy { it.matchNumber }
+        )
+    }
 
     /** Each character is 1/X/2 if verified, or '-' when not yet known. */
     fun resultCodes(matchLabels: List<String>, liveScores: List<MatchLiveScore>): Pair<String, String> {
@@ -127,7 +252,7 @@ object CouponPoolEvaluator {
         ).take(40).toList()
     }
 
-    private fun resolveScores(labels: List<String>, liveScores: List<MatchLiveScore>): List<MatchLiveScore?> {
+    fun resolveScores(labels: List<String>, liveScores: List<MatchLiveScore>): List<MatchLiveScore?> {
         val scoresByTeams = liveScores
             .filter { it.homeScore != null && it.awayScore != null && it.status != MatchStatus.UPCOMING }
             .groupBy { pairKey(it.homeTeam, it.awayTeam) }
@@ -150,13 +275,29 @@ object CouponPoolEvaluator {
             .replace(Regex("\\p{M}+"), "")
             .replace(Regex("[^a-z0-9 ]"), " ")
             .trim().replace(Regex("\\s+"), " ")
-        return aliases[deaccented] ?: deaccented
+        aliases[deaccented]?.let { return it }
+
+        val tokens = deaccented.split(" ").toMutableList()
+        while (tokens.size > 1 && tokens.first() in clubSponsorPrefixes) {
+            tokens.removeAt(0)
+        }
+        while (tokens.size > 1 && tokens.last() in clubCorporateSuffixes) {
+            tokens.removeAt(tokens.size - 1)
+        }
+        val stripped = tokens.joinToString(" ")
+        return aliases[stripped] ?: stripped
     }
 
     private fun matchTimeMs(value: String, isBulletin: Boolean): Long? {
         if (value.isBlank()) return null
         val patterns = if (isBulletin) listOf("dd.MM.yyyy HH:mm", "yyyy-MM-dd HH:mm:ss")
-            else listOf("yyyy-MM-dd'T'HH:mm:ssXXX", "yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd HH:mm:ss")
+            else listOf(
+                "yyyy-MM-dd'T'HH:mm:ssXXX",
+                "yyyy-MM-dd'T'HH:mm:ss'Z'",
+                "yyyy-MM-dd'T'HH:mmXXX",
+                "yyyy-MM-dd'T'HH:mm'Z'",
+                "yyyy-MM-dd HH:mm:ss"
+            )
         return patterns.firstNotNullOfOrNull { pattern ->
             try {
                 SimpleDateFormat(pattern, Locale.ROOT).apply {

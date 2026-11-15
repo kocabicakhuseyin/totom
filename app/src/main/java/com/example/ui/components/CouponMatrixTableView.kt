@@ -60,7 +60,9 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.engine.LiveBulletinTracker
 import com.example.model.Coupon
+import com.example.model.MatchLiveScore
 import com.example.model.PredictionOutcome
 import com.example.model.TotoColumn
 import com.example.model.TotoMatch
@@ -95,17 +97,44 @@ private val CellBorderColor = Color(0x33000000)
 fun CouponMatrixTableView(
     coupon: Coupon,
     matches: List<TotoMatch> = emptyList(),
+    liveScores: List<MatchLiveScore> = emptyList(),
     onDeleteCoupon: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     var isExpanded by remember { mutableStateOf(false) }
     val displayedCount = if (isExpanded) coupon.totalColumns else minOf(10, coupon.totalColumns)
 
-    // Live Match Outcomes map (Match index 0..14 -> Outcome? null means upcoming)
-    var liveResults by remember(coupon.id) {
+    // Manual override outcomes for simulation (Match index 0..14 -> Outcome?)
+    var manualOverrides by remember(coupon.id) {
         mutableStateOf(mapOf<Int, PredictionOutcome?>())
     }
     var showLiveSimControls by remember { mutableStateOf(false) }
+
+    // Verified live bulletin outcomes from liveScores merged with manual simulation overrides
+    val bulletinMatchesCount = remember(matches, liveScores) {
+        LiveBulletinTracker.evaluate(matches = matches, liveScores = liveScores, coupons = emptyList()).resolvedCount
+    }
+    val liveResults = remember(matches, liveScores, manualOverrides) {
+        val snapshot = LiveBulletinTracker.evaluate(
+            matches = matches,
+            liveScores = liveScores,
+            coupons = emptyList()
+        )
+        val merged = mutableMapOf<Int, PredictionOutcome?>()
+        snapshot.bulletinMatches.forEach { state ->
+            if (state.isResolved && state.outcome != null) {
+                merged[state.matchIndex] = state.outcome
+            }
+        }
+        manualOverrides.forEach { (idx, override) ->
+            if (override != null) {
+                merged[idx] = override
+            } else {
+                merged.remove(idx)
+            }
+        }
+        merged.toMap()
+    }
 
     // 1. Calculate Live Stats for all columns
     val finishedMatchesCount = liveResults.count { it.value != null }
@@ -229,10 +258,13 @@ fun CouponMatrixTableView(
                 Spacer(modifier = Modifier.height(6.dp))
 
                 Text(
-                    text = if (finishedMatchesCount == 0) {
-                        "Maçlar henüz başlamadı (15 maç beklemede). Skor simülasyonu ile kupon gidişatını test edebilirsiniz."
-                    } else {
-                        "$finishedMatchesCount / 15 Maç Sonuçlandı. Kuponlarınızın anlık ikramiye durumu:"
+                    text = when {
+                        finishedMatchesCount == 0 ->
+                            "Maçlar henüz başlamadı (15 maç beklemede). Canlı skorlar geldikçe otomatik güncellenir."
+                        bulletinMatchesCount > 0 && manualOverrides.isEmpty() ->
+                            "Canlı bültenden $finishedMatchesCount / 15 maç eşleşti. 12–15 anlık ikramiye durumu:"
+                        else ->
+                            "$finishedMatchesCount / 15 Maç değerlendirildi. Anlık 12–15 ikramiye durumu:"
                     },
                     color = TextSecondary,
                     fontSize = 11.sp
@@ -240,34 +272,41 @@ fun CouponMatrixTableView(
 
                 Spacer(modifier = Modifier.height(10.dp))
 
-                // Live Active Coupons Counters (15, 14, 13, 12)
+                // Live Active Coupons Counters (15, 14, 13, 12, Yanan)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(5.dp)
                 ) {
                     LiveTierCounter(
-                        tierName = "15 Yolunda",
+                        tierName = "15 Yol.",
                         aliveCount = aliveFor15,
                         totalCount = totalCols,
                         badgeColor = CasinoGold,
                         modifier = Modifier.weight(1f)
                     )
                     LiveTierCounter(
-                        tierName = "14 Garanti",
+                        tierName = "14 Yol.",
                         aliveCount = aliveFor14,
                         totalCount = totalCols,
                         badgeColor = ElectricCyan,
                         modifier = Modifier.weight(1f)
                     )
                     LiveTierCounter(
-                        tierName = "13 Yolunda",
+                        tierName = "13 Yol.",
                         aliveCount = aliveFor13,
                         totalCount = totalCols,
                         badgeColor = ElectricGreen,
                         modifier = Modifier.weight(1f)
                     )
                     LiveTierCounter(
-                        tierName = "Yanan / Elenen",
+                        tierName = "12 Yol.",
+                        aliveCount = aliveFor12,
+                        totalCount = totalCols,
+                        badgeColor = NeonAmber,
+                        modifier = Modifier.weight(1f)
+                    )
+                    LiveTierCounter(
+                        tierName = "Yanan",
                         aliveCount = bustedCols,
                         totalCount = totalCols,
                         badgeColor = if (bustedCols > 0) VibrantRed else TextMuted,
@@ -326,9 +365,9 @@ fun CouponMatrixTableView(
                                                 PredictionOutcome.DRAW -> PredictionOutcome.AWAY
                                                 PredictionOutcome.AWAY -> null
                                             }
-                                            val updated = liveResults.toMutableMap()
+                                            val updated = manualOverrides.toMutableMap()
                                             if (next != null) updated[mIdx] = next else updated.remove(mIdx)
-                                            liveResults = updated
+                                            manualOverrides = updated
                                         }
                                         .padding(horizontal = 6.dp, vertical = 4.dp)
                                 ) {
@@ -360,7 +399,7 @@ fun CouponMatrixTableView(
                                             sim[i] = if (h > a) PredictionOutcome.HOME else PredictionOutcome.DRAW
                                         }
                                     }
-                                    liveResults = sim
+                                    manualOverrides = sim
                                 },
                                 shape = RoundedCornerShape(6.dp),
                                 modifier = Modifier
@@ -380,7 +419,7 @@ fun CouponMatrixTableView(
                                         val a = match?.probability?.away?.firstOrNull() ?: 25
                                         sim[i] = if (h > a) PredictionOutcome.HOME else PredictionOutcome.AWAY
                                     }
-                                    liveResults = sim
+                                    manualOverrides = sim
                                 },
                                 shape = RoundedCornerShape(6.dp),
                                 modifier = Modifier
@@ -392,7 +431,7 @@ fun CouponMatrixTableView(
 
                             // Reset
                             OutlinedButton(
-                                onClick = { liveResults = emptyMap() },
+                                onClick = { manualOverrides = emptyMap() },
                                 shape = RoundedCornerShape(6.dp),
                                 modifier = Modifier
                                     .weight(0.7f)
