@@ -26,32 +26,21 @@ jobs:
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
+            echo "::error::sdkmanager bulunamadi: $SDK_ROOT"
+            exit 1
+          fi
           echo "Android SDK: $SDK_ROOT"
-          if [ ! -d "$SDK_ROOT/cmdline-tools" ]; then
-            echo "::error::Android command-line tools bulunamadi: $SDK_ROOT/cmdline-tools"
-            exit 1
-          fi
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-          if [ -z "$SDKMANAGER" ]; then
-            echo "::error::sdkmanager bulunamadi. SDK klasorunu kontrol edin."
-            find "$SDK_ROOT" -maxdepth 3 -type d | head -80
-            exit 1
-          fi
           echo "sdkmanager: $SDKMANAGER"
-          chmod +x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          bash "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - name: Gradle 9.3.1 kur
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
-      - name: Debug imza anahtari hazirla
-        run: |
-          if [ ! -f debug.keystore ]; then
-            keytool -genkeypair -keystore debug.keystore -alias androiddebugkey \
-              -storepass android -keypass android -keyalg RSA -keysize 2048 \
-              -validity 10000 -dname 'CN=Android Debug,O=Android,C=US'
-          fi
       - name: APK derle
         env:
           API_FOOTBALL_KEY: ${{ secrets.API_FOOTBALL_KEY }}
@@ -81,14 +70,15 @@ jobs:
         run: |
           set -euo pipefail
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
-          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
-          if [ -z "$SDKMANAGER" ]; then
+          SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          if [ -z "$SDKMANAGER" ] || [ ! -f "$SDKMANAGER" ]; then
             echo "::error::sdkmanager bulunamadi: $SDK_ROOT"
             exit 1
           fi
-          chmod +x "$SDKMANAGER"
-          yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null || true
-          "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          bash "$SDKMANAGER" --sdk_root="$SDK_ROOT" --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
