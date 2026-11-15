@@ -11,7 +11,7 @@ permissions:
 jobs:
   apk:
     name: APK derle ve yukle
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - name: Checkout
@@ -21,11 +21,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - name: Android SDK kur
-        uses: android-actions/setup-android@v3
-      - name: Android API 36 paketlerini kur
+      - name: Android SDK paketlerini kur
         run: |
-          sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+          command -v sdkmanager
+          sdkmanager --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - name: Gradle 9.3.1 kur
         uses: gradle/actions/setup-gradle@v4
         with:
@@ -53,7 +52,7 @@ jobs:
     name: Birim testleri (APK'dan bagimsiz)
     needs: apk
     if: always()
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -61,9 +60,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@v3
-      - name: SDK paketleri
-        run: sdkmanager 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
+      - name: Android SDK paketlerini kur
+        run: |
+          command -v sdkmanager
+          sdkmanager --install 'platform-tools' 'platforms;android-36' 'build-tools;36.0.0'
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '9.3.1'
