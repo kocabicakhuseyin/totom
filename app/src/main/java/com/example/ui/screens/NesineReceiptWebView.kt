@@ -3,6 +3,7 @@ package com.example.ui.screens
 import android.annotation.SuppressLint
 import android.os.Handler
 import android.os.Looper
+import android.webkit.RenderProcessGoneDetail
 import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -20,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.example.model.NesineReceipt
 import com.example.model.NesineReceiptParser
+import com.example.network.HeadlessWebViewSupport
 import org.json.JSONObject
 import org.json.JSONTokener
 
@@ -33,6 +35,7 @@ fun NesineReceiptWebView(link: String, onResult: (Result<NesineReceipt>) -> Unit
     val context = LocalContext.current
     val latestCallback = rememberUpdatedState(onResult)
     val handler = remember(link) { Handler(Looper.getMainLooper()) }
+    var rendererGone = false
     val webView = remember(link) {
         WebView(context).apply {
             settings.javaScriptEnabled = true // The receipt table is rendered by Nesine JavaScript.
@@ -50,7 +53,7 @@ fun NesineReceiptWebView(link: String, onResult: (Result<NesineReceipt>) -> Unit
             }
 
             fun checkReceipt() {
-                if (completed) return
+                if (completed || rendererGone) return
                 attempts++
                 evaluateJavascript(
                     """
@@ -120,6 +123,16 @@ fun NesineReceiptWebView(link: String, onResult: (Result<NesineReceipt>) -> Unit
                         finish(Result.failure(IllegalStateException("Nesine bağlantısı açılamadı.")))
                     }
                 }
+
+                override fun onRenderProcessGone(
+                    view: WebView?,
+                    detail: RenderProcessGoneDetail?
+                ): Boolean {
+                    rendererGone = true
+                    HeadlessWebViewSupport.recordRendererCrash()
+                    finish(Result.failure(IllegalStateException("WebView tarayıcı işlemi kapandı.")))
+                    return true
+                }
             }
             loadUrl(link)
         }
@@ -127,8 +140,7 @@ fun NesineReceiptWebView(link: String, onResult: (Result<NesineReceipt>) -> Unit
     DisposableEffect(webView) {
         onDispose {
             handler.removeCallbacksAndMessages(null)
-            webView.stopLoading()
-            webView.destroy()
+            HeadlessWebViewSupport.destroySafely(webView, rendererGone)
         }
     }
     AndroidView(factory = { webView }, modifier = Modifier.fillMaxWidth().height(2.dp))

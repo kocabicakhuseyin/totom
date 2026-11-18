@@ -9,6 +9,7 @@ import com.example.model.FormulaType
 import com.example.model.ForumPost
 import com.example.model.INSUFFICIENT_BALANCE_ERROR
 import com.example.model.MatchProbability
+import com.example.model.MatchStatus
 import com.example.model.NesineCredentials
 import com.example.model.PlatformCredentials
 import com.example.model.PredictionOutcome
@@ -25,6 +26,7 @@ import com.example.network.model.toDomainTotoMatch
 import com.example.repository.LiveScoreSource
 import com.example.repository.SporTotoBulletinRepository
 import com.example.repository.SporTotoBulletinRepositoryImpl
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -45,10 +47,13 @@ import com.example.model.MatchLiveScore
 
 class TotoViewModel(
     private val bulletinRepository: SporTotoBulletinRepository = SporTotoBulletinRepositoryImpl(),
-    private val walletRepository: WalletRepository? = null
+    private val walletRepository: WalletRepository? = null,
+    private val nesineOnlyUi: Boolean = false
 ) : ViewModel() {
 
-    private val _matches = MutableStateFlow<List<TotoMatch>>(createInitialMatches())
+    private val _matches = MutableStateFlow<List<TotoMatch>>(
+        if (nesineOnlyUi) emptyList() else createInitialMatches()
+    )
     val matches: StateFlow<List<TotoMatch>> = _matches.asStateFlow()
 
     val currentBulletin: StateFlow<WeeklyBulletinResponse?> = bulletinRepository.cachedBulletin
@@ -62,7 +67,7 @@ class TotoViewModel(
     private val _bulletinError = MutableStateFlow<String?>(null)
     val bulletinError: StateFlow<String?> = _bulletinError.asStateFlow()
 
-    private val _hasPlayableBulletin = MutableStateFlow(true)
+    private val _hasPlayableBulletin = MutableStateFlow(!nesineOnlyUi)
     val hasPlayableBulletin: StateFlow<Boolean> = _hasPlayableBulletin.asStateFlow()
 
     private val _walletError = MutableStateFlow<String?>(null)
@@ -186,28 +191,17 @@ class TotoViewModel(
     private val _favoritedMatchNumbers = MutableStateFlow<Set<Int>>(emptySet())
     val favoritedMatchNumbers: StateFlow<Set<Int>> = _favoritedMatchNumbers.asStateFlow()
 
-    init {
-        // Initial bulletin load & starter coupon
-        refreshBulletin(forceRefresh = false)
-        generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
+    private var livePollingJob: Job? = null
+    private var bulletinLoadJob: Job? = null
+    private var isPassiveInitRefresh: Boolean = false
 
-        // Poll live scores while the tracker or bulletin is visible (45s for keyless ESPN, 3m for API-Football).
-        // The repository also enforces an independent throttle.
-        viewModelScope.launch {
-            val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
-            while (true) {
-                if (_isLivePolling.value) {
-                    val result = bulletinRepository.pollLiveScores()
-                    result.onSuccess {
-                        _liveScoreError.value = null
-                        _lastLiveUpdateTime.value = timeFormat.format(Date())
-                    }.onFailure { _liveScoreError.value = it.message ?: "Canlı veri alınamadı." }
-                    _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
-                }
-                val intervalMs = if (activeLiveScoreSource.value == LiveScoreSource.ESPN) 45_000L else 180_000L
-                delay(intervalMs)
-            }
+    init {
+        // Initial bulletin load & starter coupon (in Nesine-only mode, starter coupon is created once real matches load)
+        refreshBulletin(forceRefresh = false)
+        if (!nesineOnlyUi) {
+            generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
         }
+        updatePollingLoop()
 
         // Sync with Room database if walletRepository is provided
         walletRepository?.let { repo ->
@@ -241,10 +235,13 @@ class TotoViewModel(
     }
 
     fun refreshBulletin(forceRefresh: Boolean = true) {
-        // Ignore repeated taps while a bulletin request is already running.
-        if (_isRefreshingBulletin.value) return
+        if (_isRefreshingBulletin.value && (!forceRefresh || !isPassiveInitRefresh)) return
+        if (forceRefresh && isPassiveInitRefresh) {
+            bulletinLoadJob?.cancel()
+        }
+        isPassiveInitRefresh = !forceRefresh
         _isRefreshingBulletin.value = true
-        viewModelScope.launch {
+        val job = viewModelScope.launch {
             try {
                 val result = bulletinRepository.getDomainMatches(forceRefresh)
                 result.onSuccess { freshMatches ->
@@ -254,6 +251,9 @@ class TotoViewModel(
                         _matches.value = freshMatches
                         _hasPlayableBulletin.value = true
                         _bulletinError.value = null
+                        if (nesineOnlyUi && _coupons.value.isEmpty()) {
+                            generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
+                        }
                         syncStarterForumPostsWithBulletin(freshMatches)
                         if (liveScores.value.isNotEmpty()) {
                             _liveScoreError.value = null
@@ -279,9 +279,13 @@ class TotoViewModel(
                     _bulletinMessage.value = errorMsg
                 }
             } finally {
-                _isRefreshingBulletin.value = false
+                if (bulletinLoadJob === coroutineContext[Job]) {
+                    isPassiveInitRefresh = false
+                    _isRefreshingBulletin.value = false
+                }
             }
         }
+        bulletinLoadJob = job
     }
 
     fun syncTurkishLeagueBulletinFromApi() {
@@ -334,6 +338,220 @@ class TotoViewModel(
                 _isRefreshingBulletin.value = false
             }
         }
+    }
+
+    fun scrapeIddaaLiveBulletin() {
+        if (_isRefreshingBulletin.value) return
+        _isRefreshingBulletin.value = true
+        viewModelScope.launch {
+            try {
+                val scrapeResult = bulletinRepository.scrapeIddaaLiveBulletin()
+                scrapeResult.onSuccess { bulletin ->
+                    val freshMatches = bulletin.matches.map { it.toDomainTotoMatch() }
+                    val playable = freshMatches.size >= 15 && bulletin.isPlayable()
+                    if (playable) {
+                        _matches.value = freshMatches
+                        _hasPlayableBulletin.value = true
+                        _bulletinError.value = null
+                        _liveScoreError.value = null
+                        _lastLiveUpdateTime.value =
+                            SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                        syncStarterForumPostsWithBulletin(freshMatches)
+                        _bulletinMessage.value =
+                            "iddaa.com/canli-skor/futbol canlı scraping tamamlandı: ${bulletin.bulletinTitle}"
+                    } else {
+                        _matches.value = emptyList()
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = NO_NEW_BULLETIN_ERROR
+                        _bulletinMessage.value = NO_NEW_BULLETIN_ERROR
+                    }
+                }.onFailure { err ->
+                    val msg = err.message ?: "iddaa.com/canli-skor/futbol üzerinden canlı scraping başarısız."
+                    _liveScoreError.value = msg
+                    _bulletinMessage.value = msg
+                }
+            } finally {
+                _isRefreshingBulletin.value = false
+            }
+        }
+    }
+
+    fun scrapeNesineResultsNow(syncBulletin: Boolean = true) {
+        if (_isRefreshingBulletin.value && !isPassiveInitRefresh) return
+        if (isPassiveInitRefresh) bulletinLoadJob?.cancel()
+        isPassiveInitRefresh = false
+        _isRefreshingBulletin.value = true
+        val job = viewModelScope.launch {
+            try {
+                val scrapeResult = bulletinRepository.scrapeNesineResultsAndBulletin(updateBulletin = syncBulletin)
+                scrapeResult.onSuccess { bulletin ->
+                    if (syncBulletin) {
+                        val freshMatches = bulletin.matches.map { it.toDomainTotoMatch() }
+                        val playable = freshMatches.size >= 15 && bulletin.isPlayable()
+                        if (playable) {
+                            _matches.value = freshMatches
+                            _hasPlayableBulletin.value = true
+                            _bulletinError.value = null
+                            _liveScoreError.value = null
+                            _lastLiveUpdateTime.value =
+                                SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                            syncStarterForumPostsWithBulletin(freshMatches)
+                            val scores = liveScores.value
+                            val liveCnt = scores.count { it.isLive }
+                            val finCnt = scores.count { it.status == MatchStatus.FINISHED }
+                            _bulletinMessage.value =
+                                "nesine.com/sportoto/mac-sonuclari anlık çekildi ($liveCnt Canlı • $finCnt Biten)"
+                        } else {
+                            _matches.value = emptyList()
+                            _hasPlayableBulletin.value = false
+                            _bulletinError.value = NO_NEW_BULLETIN_ERROR
+                            _bulletinMessage.value = NO_NEW_BULLETIN_ERROR
+                        }
+                    } else {
+                        _liveScoreError.value = null
+                        _lastLiveUpdateTime.value =
+                            SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                        val scores = liveScores.value
+                        val liveCnt = scores.count { it.isLive }
+                        val finCnt = scores.count { it.status == MatchStatus.FINISHED }
+                        _bulletinMessage.value =
+                            "nesine.com/sportoto/mac-sonuclari anlık çekildi ($liveCnt Canlı • $finCnt Biten)"
+                    }
+                }.onFailure { err ->
+                    val msg = err.message ?: "nesine.com/sportoto/mac-sonuclari üzerinden sonuçlar çekilemedi."
+                    _liveScoreError.value = msg
+                    _bulletinMessage.value = msg
+                }
+            } finally {
+                if (bulletinLoadJob === coroutineContext[Job]) {
+                    _isRefreshingBulletin.value = false
+                }
+            }
+        }
+        bulletinLoadJob = job
+    }
+
+    fun scrapeNesineBulletinNow() {
+        if (_isRefreshingBulletin.value && !isPassiveInitRefresh) return
+        if (isPassiveInitRefresh) bulletinLoadJob?.cancel()
+        isPassiveInitRefresh = false
+        _isRefreshingBulletin.value = true
+        val job = viewModelScope.launch {
+            try {
+                val scrapeResult = bulletinRepository.scrapeNesineBulletin(forceRefresh = true)
+                scrapeResult.onSuccess { bulletin ->
+                    val freshMatches = bulletin.matches.map { it.toDomainTotoMatch() }
+                    val playable = freshMatches.size >= 15 && bulletin.isPlayable()
+                    if (playable) {
+                        _matches.value = freshMatches
+                        _hasPlayableBulletin.value = true
+                        _bulletinError.value = null
+                        if (nesineOnlyUi && _coupons.value.isEmpty()) {
+                            generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
+                        }
+                        syncStarterForumPostsWithBulletin(freshMatches)
+                        _bulletinMessage.value =
+                            "nesine.com/sportoto bülteni güncellendi (${freshMatches.size} maç)"
+                        if (liveScores.value.isEmpty()) {
+                            pollLiveScoresNow()
+                        }
+                    } else {
+                        _matches.value = emptyList()
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = NO_NEW_BULLETIN_ERROR
+                        _bulletinMessage.value = NO_NEW_BULLETIN_ERROR
+                    }
+                }.onFailure { err ->
+                    val msg = err.message?.takeIf { it.isNotBlank() } ?: NO_NEW_BULLETIN_ERROR
+                    if (_matches.value.size < 15) {
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = msg
+                    }
+                    _bulletinMessage.value = msg
+                }
+            } finally {
+                if (bulletinLoadJob === coroutineContext[Job]) {
+                    _isRefreshingBulletin.value = false
+                }
+            }
+        }
+        bulletinLoadJob = job
+    }
+
+    fun scrapeBilyonerLiveScoresNow() {
+        if (_isRefreshingLiveScores.value) return
+        _isRefreshingLiveScores.value = true
+        viewModelScope.launch {
+            try {
+                val res = bulletinRepository.scrapeBilyonerLiveScores(forceRefresh = true)
+                res.onSuccess { scores ->
+                    _liveScoreError.value = null
+                    _lastLiveUpdateTime.value =
+                        SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                    val liveCnt = scores.count { it.isLive }
+                    val finCnt = scores.count { it.status == MatchStatus.FINISHED }
+                    _bulletinMessage.value =
+                        "bilyoner.com/canli-skor verileri çekildi (${scores.size} maç • $liveCnt Canlı • $finCnt Biten)"
+                }.onFailure { err ->
+                    val msg = err.message ?: "bilyoner.com/canli-skor üzerinden veriler çekilemedi."
+                    _liveScoreError.value = msg
+                    _bulletinMessage.value = msg
+                }
+            } finally {
+                _isRefreshingLiveScores.value = false
+            }
+        }
+    }
+
+    fun scrapeBilyonerLiveBulletinNow() {
+        if (_isRefreshingBulletin.value && !isPassiveInitRefresh) return
+        if (isPassiveInitRefresh) bulletinLoadJob?.cancel()
+        isPassiveInitRefresh = false
+        _isRefreshingBulletin.value = true
+        val job = viewModelScope.launch {
+            try {
+                val scrapeResult = bulletinRepository.scrapeBilyonerSporTotoBulletin()
+                scrapeResult.onSuccess { bulletin ->
+                    val freshMatches = bulletin.matches.map { it.toDomainTotoMatch() }
+                    val playable = freshMatches.size >= 15 && bulletin.isPlayable()
+                    if (playable) {
+                        _matches.value = freshMatches
+                        _hasPlayableBulletin.value = true
+                        _bulletinError.value = null
+                        _liveScoreError.value = null
+                        _lastLiveUpdateTime.value =
+                            SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date())
+                        if (nesineOnlyUi && _coupons.value.isEmpty()) {
+                            generateCoupon(FormulaType.GUARANTEE_14, "14 Garanti (N-1) Özel Başlangıç Kuponu")
+                        }
+                        syncStarterForumPostsWithBulletin(freshMatches)
+                        _bulletinMessage.value =
+                            "bilyoner.com/spor-toto bülteni çekildi (${freshMatches.size} maç)"
+                        if (liveScores.value.isEmpty()) {
+                            pollLiveScoresNow()
+                        }
+                    } else {
+                        _matches.value = emptyList()
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = NO_NEW_BULLETIN_ERROR
+                        _bulletinMessage.value = NO_NEW_BULLETIN_ERROR
+                    }
+                }.onFailure { err ->
+                    val msg = err.message ?: "bilyoner.com/spor-toto üzerinden bülten çekilemedi."
+                    _liveScoreError.value = msg
+                    if (_matches.value.size < 15) {
+                        _hasPlayableBulletin.value = false
+                        _bulletinError.value = msg
+                    }
+                    _bulletinMessage.value = msg
+                }
+            } finally {
+                if (bulletinLoadJob === coroutineContext[Job]) {
+                    _isRefreshingBulletin.value = false
+                }
+            }
+        }
+        bulletinLoadJob = job
     }
 
     fun ensurePlayableBulletin(): Boolean {
@@ -619,16 +837,50 @@ class TotoViewModel(
 
     // --- Real-time Match Results & Live Polling Operations ---
 
+    private fun updatePollingLoop() {
+        if (_isLivePolling.value) {
+            if (livePollingJob?.isActive == true) return
+            livePollingJob = viewModelScope.launch {
+                val timeFormat = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                while (_isLivePolling.value) {
+                    val intervalMs = when (activeLiveScoreSource.value) {
+                        LiveScoreSource.NESINE_RESULTS -> 60_000L
+                        LiveScoreSource.BILYONER_LIVE -> 60_000L
+                        LiveScoreSource.IDDAA_SCRAPE -> 60_000L
+                        LiveScoreSource.ESPN -> 45_000L
+                        LiveScoreSource.API_FOOTBALL -> 180_000L
+                    }
+                    delay(intervalMs)
+                    if (_isLivePolling.value && !_isRefreshingBulletin.value) {
+                        val result = bulletinRepository.pollLiveScores()
+                        result.onSuccess {
+                            _liveScoreError.value = null
+                            _lastLiveUpdateTime.value = timeFormat.format(Date())
+                        }.onFailure { _liveScoreError.value = it.message ?: "Canlı veri alınamadı." }
+                        _freeScoreRequestsRemaining.value = bulletinRepository.freeScoreRequestsRemaining()
+                    }
+                }
+            }
+        } else {
+            livePollingJob?.cancel()
+            livePollingJob = null
+        }
+    }
+
     fun toggleLivePolling() {
         _isLivePolling.update { !it }
+        updatePollingLoop()
     }
 
     fun setLivePolling(enabled: Boolean) {
+        if (_isLivePolling.value == enabled) return
         _isLivePolling.value = enabled
+        updatePollingLoop()
     }
 
     fun pollLiveScoresNow() {
         if (_isRefreshingLiveScores.value) return
+        if (_isRefreshingBulletin.value && liveScores.value.isNotEmpty()) return
         viewModelScope.launch {
             _isRefreshingLiveScores.value = true
             val result = bulletinRepository.pollLiveScores()

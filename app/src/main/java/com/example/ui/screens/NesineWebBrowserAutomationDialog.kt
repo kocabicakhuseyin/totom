@@ -315,10 +315,7 @@ fun NesineWebBrowserAutomationContent(
     DisposableEffect(Unit) {
         onDispose {
             runCatching { CookieManager.getInstance().flush() }
-            webViewRef?.apply {
-                stopLoading()
-                destroy()
-            }
+            com.example.network.HeadlessWebViewSupport.destroySafely(webViewRef, rendererAlreadyGone = false)
             webViewRef = null
         }
     }

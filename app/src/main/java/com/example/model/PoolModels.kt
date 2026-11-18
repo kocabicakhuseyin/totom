@@ -146,7 +146,24 @@ object CouponPoolEvaluator {
         "tottenham hotspur" to "tottenham",
         "wolverhampton wanderers" to "wolves",
         "west ham united" to "west ham",
-        "brighton and hove albion" to "brighton"
+        "brighton and hove albion" to "brighton",
+        "abd" to "usa",
+        "united states" to "usa",
+        "fas" to "morocco",
+        "nijer" to "niger",
+        "nijerya" to "nigeria",
+        "misir" to "egypt",
+        "tunus" to "tunisia",
+        "cezayir" to "algeria",
+        "guney afrika" to "south africa",
+        "meksika" to "mexico",
+        "kanada" to "canada",
+        "guatemala" to "guatemala",
+        "jamayka" to "jamaica",
+        "jamaika" to "jamaica",
+        "buyuksehir belediye erzurumspor" to "erzurum bb",
+        "betis" to "real betis",
+        "manchester utd" to "manchester united"
     )
 
     private val clubSponsorPrefixes = setOf(
@@ -290,19 +307,31 @@ object CouponPoolEvaluator {
 
     private fun matchTimeMs(value: String, isBulletin: Boolean): Long? {
         if (value.isBlank()) return null
-        val patterns = if (isBulletin) listOf("dd.MM.yyyy HH:mm", "yyyy-MM-dd HH:mm:ss")
-            else listOf(
-                "yyyy-MM-dd'T'HH:mm:ssXXX",
-                "yyyy-MM-dd'T'HH:mm:ss'Z'",
-                "yyyy-MM-dd'T'HH:mmXXX",
-                "yyyy-MM-dd'T'HH:mm'Z'",
-                "yyyy-MM-dd HH:mm:ss"
-            )
+        if (isBulletin) {
+            return listOf("dd.MM.yyyy HH:mm", "yyyy-MM-dd HH:mm:ss").firstNotNullOfOrNull { pattern ->
+                runCatching {
+                    SimpleDateFormat(pattern, Locale.ROOT).apply {
+                        isLenient = false
+                        timeZone = TimeZone.getTimeZone("Europe/Istanbul")
+                    }.parse(value)?.time
+                }.getOrNull()
+            }
+        }
+        val patterns = listOf(
+            "dd.MM.yyyy HH:mm",
+            "yyyy-MM-dd'T'HH:mm:ssXXX",
+            "yyyy-MM-dd'T'HH:mm:ss'Z'",
+            "yyyy-MM-dd'T'HH:mmXXX",
+            "yyyy-MM-dd'T'HH:mm'Z'",
+            "yyyy-MM-dd HH:mm:ss"
+        )
         return patterns.firstNotNullOfOrNull { pattern ->
             try {
                 SimpleDateFormat(pattern, Locale.ROOT).apply {
                     isLenient = false
-                    timeZone = TimeZone.getTimeZone(if (isBulletin) "Europe/Istanbul" else "UTC")
+                    timeZone = TimeZone.getTimeZone(
+                        if (pattern == "dd.MM.yyyy HH:mm") "Europe/Istanbul" else "UTC"
+                    )
                 }.parse(value)?.time
             } catch (_: Exception) { null }
         }

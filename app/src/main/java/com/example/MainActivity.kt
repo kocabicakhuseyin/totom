@@ -144,9 +144,17 @@ fun MainAppContent(
                     bulletinRepository = SporTotoBulletinRepositoryImpl(
                         applicationContext = context.applicationContext,
                         preferTurkishLeagueBulletin = true,
-                        initialSource = LiveScoreSource.ESPN
+                        initialSource = LiveScoreSource.BILYONER_LIVE,
+                        enforceNesineOnly = false,
+                        allowedSources = setOf(
+                            LiveScoreSource.NESINE_RESULTS,
+                            LiveScoreSource.BILYONER_LIVE
+                        ),
+                        allowOfflineBulletinFallback = false,
+                        bilyonerSporTotoScraper = com.example.network.BilyonerSporTotoScraper(context.applicationContext)
                     ),
-                    walletRepository = walletRepository
+                    walletRepository = walletRepository,
+                    nesineOnlyUi = true
                 ) as T
             }
         }
@@ -269,15 +277,14 @@ fun MainAppContent(
         }
     }
     LaunchedEffect(currentTab, showPool, activeLiveScoreSource) {
-        val showLiveScores = currentTab == AppNavTab.RESULTS ||
-            showPool ||
-            (activeLiveScoreSource == LiveScoreSource.ESPN &&
-                currentTab in listOf(AppNavTab.HOME, AppNavTab.ANALYSIS, AppNavTab.COUPONS))
+        val showLiveScores = currentTab == AppNavTab.RESULTS || showPool
         viewModel.setLivePolling(showLiveScores)
         if (showLiveScores) {
-            viewModel.pollLiveScoresNow()
+            if (!isRefreshingBulletin || liveScores.isEmpty()) {
+                viewModel.pollLiveScoresNow()
+            }
             if (currentTab == AppNavTab.RESULTS && previousWeekReport == null) {
-                viewModel.loadPreviousWeekWithEspn(forceRefresh = false)
+                viewModel.loadPreviousWeekBulletin(forceRefresh = false)
             }
         }
     }
@@ -394,15 +401,16 @@ fun MainAppContent(
                             }
                         },
                         isRefreshing = isRefreshingBulletin,
-                        onRefreshBulletin = { viewModel.refreshBulletin(forceRefresh = true) },
-                        onSyncTurkishLeagueBulletin = { viewModel.syncTurkishLeagueBulletinFromApi() },
+                        onRefreshBulletin = { viewModel.scrapeBilyonerLiveBulletinNow() },
+                        onScrapeNesineResults = { viewModel.scrapeNesineResultsNow(syncBulletin = false) },
+                        onScrapeBilyonerLive = { viewModel.scrapeBilyonerLiveBulletinNow() },
                         previousWeekReport = previousWeekReport,
                         isLoadingPreviousWeek = isLoadingPreviousWeek,
                         previousWeekError = previousWeekError,
-                        hasApiKey = hasApiFootballKey,
+                        hasApiKey = true,
                         requiresApiKey = false,
-                        providerLabel = "ESPN",
-                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekWithEspn(force) },
+                        providerLabel = "Bilyoner",
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) },
                         onNavigateToLiveTab = { currentTab = AppNavTab.RESULTS },
                         favoritedMatchNumbers = favoritedMatchNumbers,
                         onToggleFavorite = { viewModel.toggleFavoriteMatch(it) },
@@ -417,9 +425,9 @@ fun MainAppContent(
                         providerName = liveScoreProvider,
                         activeSource = activeLiveScoreSource,
                         onSelectSource = { viewModel.selectLiveScoreSource(it) },
-                        hasApiKey = hasApiFootballKey,
-                        freeRequestsRemaining = freeScoreRequestsRemaining,
-                        onSaveApiKey = { viewModel.saveApiFootballKey(it) },
+                        hasApiKey = true,
+                        freeRequestsRemaining = null,
+                        onSaveApiKey = {},
                         lastUpdateTime = lastLiveUpdateTime,
                         isRefreshing = isRefreshingLiveScores,
                         errorMessage = liveScoreError,
@@ -431,11 +439,13 @@ fun MainAppContent(
                             currentTab = AppNavTab.COUPONS
                         },
                         isSyncingBulletin = isRefreshingBulletin,
-                        onSyncTurkishLeagueBulletin = { viewModel.syncTurkishLeagueBulletinFromApi() },
+                        onScrapeNesineResults = { viewModel.scrapeNesineResultsNow(syncBulletin = false) },
+                        onScrapeBilyonerLive = { viewModel.scrapeBilyonerLiveScoresNow() },
+                        onScrapeBilyonerBulletin = { viewModel.scrapeBilyonerLiveBulletinNow() },
                         previousWeekReport = previousWeekReport,
                         isLoadingPreviousWeek = isLoadingPreviousWeek,
                         previousWeekError = previousWeekError,
-                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekWithEspn(force) }
+                        onLoadPreviousWeek = { force -> viewModel.loadPreviousWeekBulletin(force) }
                     )
                 }
 
@@ -454,7 +464,13 @@ fun MainAppContent(
                         onOpenWallet = { showGooglePlayDialog = true },
                         onDeductFeeAndPlay = { coupon -> viewModel.deductColumnFee(coupon) },
                         onShareToForum = { coupon ->
-                            viewModel.addForumPost("Garantili ${coupon.formulaType.badge} kuponumu inceleyebilirsiniz (${coupon.totalColumns} kolon)!", coupon.id)
+                            viewModel.addForumPost(
+                                content = "Garantili ${coupon.formulaType.badge} kuponumu inceleyebilirsiniz (${coupon.totalColumns} kolon)!",
+                                attachedCouponId = coupon.id,
+                                attachedCouponSummary = "${coupon.title} (${coupon.totalColumns} Kolon)",
+                                attachedCouponColumns = coupon.columns.map { it.asString },
+                                attachedCouponFormulaTitle = coupon.formulaType.title
+                            )
                         },
                         onOpenWizard = { showFormulaWizard = true },
                         onOpenFilterDialog = { showFilterDialog = true },
@@ -483,6 +499,28 @@ fun MainAppContent(
                         onRefreshBulletin = { viewModel.refreshBulletin(forceRefresh = true) },
                         onOpenInAppBrowser = { targetCoupon, targetCreds ->
                             webViewAutomationTarget = targetCoupon to targetCreds
+                        },
+                        weekLabel = currentBulletin?.let { "${it.bulletinTitle} (${it.season})" }.orEmpty(),
+                        authorName = memberSession.displayName
+                            .takeIf { memberSession.isSignedIn && it.isNotBlank() }
+                            ?: userProfile.username,
+                        onShareToForumWithNote = { coupon, note ->
+                            val memberName = memberSession.displayName.takeIf { memberSession.isSignedIn && it.isNotBlank() }
+                            val providerBadge = if (memberSession.isSignedIn) memberSession.providerDisplayLabel else null
+                            val postText = if (note.isNotBlank()) {
+                                note
+                            } else {
+                                "Garantili ${coupon.formulaType.badge} kuponumu inceleyebilirsiniz (${coupon.totalColumns} kolon)!"
+                            }
+                            viewModel.addForumPost(
+                                content = postText,
+                                attachedCouponId = coupon.id,
+                                attachedCouponSummary = "${coupon.title} (${coupon.totalColumns} Kolon)",
+                                overrideAuthorName = memberName,
+                                providerLabel = providerBadge,
+                                attachedCouponColumns = coupon.columns.map { it.asString },
+                                attachedCouponFormulaTitle = coupon.formulaType.title
+                            )
                         }
                     )
                 }

@@ -106,13 +106,15 @@ fun MatchAnalysisScreen(
     onApplyFilterProfile: (FilterProfileType) -> Unit = {},
     isRefreshing: Boolean = false,
     onRefreshBulletin: () -> Unit = {},
-    onSyncTurkishLeagueBulletin: () -> Unit = {},
+    onScrapeNesineBulletin: () -> Unit = {},
+    onScrapeNesineResults: () -> Unit = {},
+    onScrapeBilyonerLive: () -> Unit = {},
     previousWeekReport: com.example.network.model.PreviousWeekBulletinReport? = null,
     isLoadingPreviousWeek: Boolean = false,
     previousWeekError: String? = null,
     hasApiKey: Boolean = false,
     requiresApiKey: Boolean = false,
-    providerLabel: String = "ESPN",
+    providerLabel: String = "Nesine",
     onLoadPreviousWeek: (Boolean) -> Unit = {},
     onNavigateToLiveTab: () -> Unit = {},
     favoritedMatchNumbers: Set<Int> = emptySet(),
@@ -156,52 +158,55 @@ fun MatchAnalysisScreen(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 FilterChip(
-                    selected = false,
+                    selected = providerLabel == "Bilyoner",
                     enabled = !isRefreshing,
-                    onClick = onRefreshBulletin,
+                    onClick = onScrapeBilyonerLive,
                     label = {
                         Text(
-                            if (isRefreshing) "Yenileniyor..." else "↻ Bülteni Yenile",
+                            if (isRefreshing) "Çekiliyor..." else "🟢 Bilyoner Spor Toto",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     },
                     colors = FilterChipDefaults.filterChipColors(
-                        containerColor = DarkCard,
-                        labelColor = ElectricCyan
+                        containerColor = Color(0xFF063B2C),
+                        labelColor = ElectricGreen,
+                        selectedContainerColor = ElectricGreen.copy(alpha = 0.25f),
+                        selectedLabelColor = Color.White
                     ),
                     border = FilterChipDefaults.filterChipBorder(
                         enabled = !isRefreshing,
-                        selected = false,
-                        borderColor = ElectricCyan
+                        selected = providerLabel == "Bilyoner",
+                        borderColor = ElectricGreen,
+                        selectedBorderColor = ElectricGreen
                     ),
                     modifier = Modifier
                         .heightIn(min = 48.dp)
-                        .testTag("chip_refresh_bulletin")
+                        .testTag("chip_scrape_bilyoner")
                 )
                 FilterChip(
                     selected = false,
                     enabled = !isRefreshing,
-                    onClick = onSyncTurkishLeagueBulletin,
+                    onClick = onScrapeNesineResults,
                     label = {
                         Text(
-                            if (isRefreshing) "Çekiliyor..." else "🇹🇷 Türkiye Ligi (API)",
+                            if (isRefreshing) "Çekiliyor..." else "🎯 Nesine Sonuçlar",
                             fontSize = 12.sp,
                             fontWeight = FontWeight.Bold
                         )
                     },
                     colors = FilterChipDefaults.filterChipColors(
-                        containerColor = Color(0xFF064E3B),
-                        labelColor = ElectricGreen
+                        containerColor = Color(0xFF3B1228),
+                        labelColor = Color(0xFFF472B6)
                     ),
                     border = FilterChipDefaults.filterChipBorder(
                         enabled = !isRefreshing,
                         selected = false,
-                        borderColor = ElectricGreen
+                        borderColor = Color(0xFFEC4899)
                     ),
                     modifier = Modifier
                         .heightIn(min = 48.dp)
-                        .testTag("btn_sync_turkish_league_bulletin")
+                        .testTag("chip_scrape_nesine")
                 )
                 FilterChip(
                     selected = false,
@@ -312,24 +317,24 @@ fun MatchAnalysisScreen(
                             textAlign = TextAlign.Center
                         )
                         Text(
-                            text = "Şu anda oynanabilecek aktif Spor Toto bülteni bulunmuyor. Yeni hafta bülteni yayınlandığında tekrar deneyin.",
+                            text = "Spor Toto 15 maçlık bülteni bilyoner.com/spor-toto üzerinden; canlı skorlar bilyoner.com/canli-skor ile eşleşir.",
                             color = TextSecondary,
                             fontSize = 13.sp,
                             textAlign = TextAlign.Center,
                             lineHeight = 18.sp
                         )
                         Button(
-                            onClick = onRefreshBulletin,
+                            onClick = onScrapeBilyonerLive,
                             enabled = !isRefreshing,
-                            colors = ButtonDefaults.buttonColors(containerColor = CasinoGold),
+                            colors = ButtonDefaults.buttonColors(containerColor = ElectricGreen),
                             shape = RoundedCornerShape(10.dp),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .heightIn(min = 48.dp)
-                                .testTag("btn_retry_bulletin")
+                                .testTag("btn_retry_bilyoner")
                         ) {
                             Text(
-                                text = if (isRefreshing) "Kontrol Ediliyor..." else "↻ Bülteni Yenile",
+                                text = if (isRefreshing) "Bilyoner Spor Toto Çekiliyor..." else "🟢 bilyoner.com/spor-toto'dan Bülteni Çek",
                                 color = Color.Black,
                                 fontWeight = FontWeight.Black,
                                 fontSize = 13.sp

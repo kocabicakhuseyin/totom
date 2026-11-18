@@ -125,6 +125,9 @@ fun CouponsScreen(
     bulletinError: String? = null,
     onRefreshBulletin: () -> Unit = {},
     onOpenInAppBrowser: ((Coupon, PlatformCredentials) -> Unit)? = null,
+    weekLabel: String = "",
+    authorName: String = "Totom Üyesi",
+    onShareToForumWithNote: ((Coupon, String) -> Unit)? = null,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -133,6 +136,7 @@ fun CouponsScreen(
     var selectedPlatformForPlay by remember { mutableStateOf<BettingPlatform?>(null) }
     var showSiteSelectionDialog by remember { mutableStateOf(false) }
     var showSavedJsonDialog by remember { mutableStateOf(false) }
+    var showShareDialog by remember { mutableStateOf(false) }
 
     if (coupons.isEmpty()) {
         Box(
@@ -802,10 +806,16 @@ fun CouponsScreen(
                         title = "Forumda Paylaş",
                         badge = "Topluluk",
                         accentColor = ElectricCyan,
-                        modifier = Modifier.weight(1f),
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("btn_share_to_forum"),
                         onClick = {
-                            onShareToForum(activeCoupon)
-                            Toast.makeText(context, "Kuponunuz foruma başarıyla paylaşıldı!", Toast.LENGTH_SHORT).show()
+                            if (onShareToForumWithNote != null) {
+                                showShareDialog = true
+                            } else {
+                                onShareToForum(activeCoupon)
+                                Toast.makeText(context, "Kuponunuz foruma başarıyla paylaşıldı!", Toast.LENGTH_SHORT).show()
+                            }
                         }
                     )
                 }
@@ -814,22 +824,16 @@ fun CouponsScreen(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    // Kupon Linkini Paylaş
+                    // Kupon & Görsel Paylaşım Stüdyosu (PNG / Sosyal Medya / Forum / Metin)
                     CompactActionButton(
                         icon = Icons.Default.Share,
-                        title = "Link & Kod Paylaş",
-                        badge = "Kupon No",
+                        title = "Görsel & Link Paylaş",
+                        badge = "PNG • Sosyal",
                         accentColor = CasinoGold,
-                        modifier = Modifier.weight(1f),
-                        onClick = {
-                            val txt = PlatformAutomationManager.formatCouponForPlatform(activeCoupon, BettingPlatform.NESINE, savedCredentials)
-                            val sendIntent = Intent().apply {
-                                action = Intent.ACTION_SEND
-                                putExtra(Intent.EXTRA_TEXT, txt)
-                                type = "text/plain"
-                            }
-                            context.startActivity(Intent.createChooser(sendIntent, "Kupon Linkini Paylaş"))
-                        }
+                        modifier = Modifier
+                            .weight(1f)
+                            .testTag("btn_open_share_studio"),
+                        onClick = { showShareDialog = true }
                     )
 
                     // Kuponları Excel Olarak İndir
@@ -942,6 +946,25 @@ fun CouponsScreen(
                 showSavedJsonDialog = false
             },
             onDeleteSavedFile = onDeleteSavedJsonFile
+        )
+    }
+
+    // VISUAL & COMMUNITY COUPON SHARE DIALOG
+    if (showShareDialog) {
+        CouponShareDialog(
+            coupon = activeCoupon,
+            matches = matches,
+            authorName = authorName,
+            weekLabel = weekLabel,
+            onDismiss = { showShareDialog = false },
+            onShareToForum = { note ->
+                if (onShareToForumWithNote != null) {
+                    onShareToForumWithNote(activeCoupon, note)
+                } else {
+                    onShareToForum(activeCoupon)
+                }
+            },
+            onOpenPool = onOpenPool
         )
     }
 }

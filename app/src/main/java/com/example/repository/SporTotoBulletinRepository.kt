@@ -10,9 +10,21 @@ import com.example.model.TotoMatch
 import com.example.network.ApiFootballLiveFixture
 import com.example.network.ApiFootballLiveResponse
 import com.example.network.ApiFootballLiveService
+import com.example.network.BILYONER_LIVE_SCORE_URL
+import com.example.network.BILYONER_SPORTOTO_RESULTS_URL
+import com.example.network.BILYONER_SPORTOTO_URL
+import com.example.network.BilyonerLiveScraper
+import com.example.network.BilyonerScrapedMatch
+import com.example.network.BilyonerSporTotoScraper
 import com.example.network.EspnEvent
 import com.example.network.EspnSoccerService
+import com.example.network.IDDAA_LIVE_FOOTBALL_URL
+import com.example.network.IddaaLiveScraper
+import com.example.network.IddaaScrapedMatch
+import com.example.network.NESINE_SPORTOTO_RESULTS_URL
+import com.example.network.NESINE_SPORTOTO_URL
 import com.example.network.NetworkModule
+import com.example.network.NesineSporTotoScraper
 import com.example.network.ScoreCardsLiveService
 import com.example.network.SporTotoApiService
 import com.example.network.resolveStatus
@@ -47,6 +59,9 @@ enum class LiveScoreSource(
     val badgeLabel: String
 ) {
     ESPN("ESPN (Ücretsiz • Anahtarsız)", "ESPN"),
+    NESINE_RESULTS("Nesine.com (Anlık Sonuçlar)", "Nesine"),
+    BILYONER_LIVE("Bilyoner.com (Canlı Skor)", "Bilyoner"),
+    IDDAA_SCRAPE("İddaa.com (Canlı Scrape)", "İddaa"),
     API_FOOTBALL("API-FOOTBALL (Free)", "API-Football")
 }
 
@@ -105,6 +120,52 @@ interface SporTotoBulletinRepository {
     suspend fun syncTurkishLeagueBulletinFromApi(): Result<WeeklyBulletinResponse> =
         Result.failure(IllegalStateException("Desteklenmiyor"))
 
+    /**
+     * Scrapes live and upcoming football fixtures directly from https://www.iddaa.com/canli-skor/futbol
+     * and updates both the 15-match bulletin and live scoreboard.
+     */
+    suspend fun scrapeIddaaLiveBulletin(): Result<WeeklyBulletinResponse> =
+        Result.failure(IllegalStateException("Desteklenmiyor"))
+
+    /**
+     * Scrapes the official 15-match Spor Toto program directly from https://www.nesine.com/sportoto.
+     */
+    suspend fun scrapeNesineBulletin(
+        forceRefresh: Boolean = true
+    ): Result<WeeklyBulletinResponse> =
+        Result.failure(IllegalStateException("Desteklenmiyor"))
+
+    /**
+     * Scrapes instant Spor Toto match results directly from https://www.nesine.com/sportoto/mac-sonuclari
+     * and updates the live scoreboard (and optionally synchronizes the 15-match Spor Toto bulletin).
+     */
+    suspend fun scrapeNesineResultsAndBulletin(
+        updateBulletin: Boolean = true
+    ): Result<WeeklyBulletinResponse> =
+        Result.failure(IllegalStateException("Desteklenmiyor"))
+
+    /**
+     * Scrapes live/upcoming/finished football matches from https://www.bilyoner.com/canli-skor
+     * and updates the live scoreboard (aligning overlapping Spor Toto bulletin fixtures).
+     */
+    suspend fun scrapeBilyonerLiveScores(
+        forceRefresh: Boolean = true
+    ): Result<List<MatchLiveScore>> =
+        Result.failure(IllegalStateException("Desteklenmiyor"))
+
+    /**
+     * Scrapes football fixtures from https://www.bilyoner.com/canli-skor and assembles
+     * a playable 15-match bulletin + live scoreboard.
+     */
+    suspend fun scrapeBilyonerLiveBulletin(): Result<WeeklyBulletinResponse> =
+        Result.failure(IllegalStateException("Desteklenmiyor"))
+
+    /**
+     * Scrapes the official 15-match Spor Toto bulletin directly from https://www.bilyoner.com/spor-toto.
+     */
+    suspend fun scrapeBilyonerSporTotoBulletin(): Result<WeeklyBulletinResponse> =
+        scrapeBilyonerLiveBulletin()
+
     val previousWeekReport: StateFlow<PreviousWeekBulletinReport?>
         get() = EMPTY_PREVIOUS_WEEK
 
@@ -143,8 +204,18 @@ class SporTotoBulletinRepositoryImpl(
     private val preferTurkishLeagueBulletin: Boolean = false,
     private val espnService: EspnSoccerService = NetworkModule.espnService,
     private val espnLeagueSlugs: List<String> = DEFAULT_ESPN_LEAGUES,
-    initialSource: LiveScoreSource = LiveScoreSource.API_FOOTBALL
+    initialSource: LiveScoreSource = LiveScoreSource.API_FOOTBALL,
+    private val iddaaScraper: IddaaLiveScraper = IddaaLiveScraper(applicationContext),
+    private val nesineScraper: NesineSporTotoScraper = NesineSporTotoScraper(applicationContext),
+    private val enforceNesineOnly: Boolean = false,
+    private val bilyonerScraper: BilyonerLiveScraper = BilyonerLiveScraper(applicationContext),
+    private val allowedSources: Set<LiveScoreSource> = LiveScoreSource.values().toSet(),
+    private val allowOfflineBulletinFallback: Boolean = true,
+    bilyonerSporTotoScraper: BilyonerSporTotoScraper? = null
 ) : SporTotoBulletinRepository {
+
+    private val resolvedBilyonerSporTotoScraper: BilyonerSporTotoScraper? =
+        bilyonerSporTotoScraper ?: applicationContext?.let { BilyonerSporTotoScraper(it) }
 
     companion object {
         /** Keep 20 of the Free plan's 100 daily calls in reserve. */
@@ -183,6 +254,12 @@ class SporTotoBulletinRepositoryImpl(
     private var lastSuccessfulRequestMs = 0L
     private var lastEspnAttemptMs = 0L
     private var lastSuccessfulEspnMs = 0L
+    private var lastIddaaAttemptMs = 0L
+    private var lastSuccessfulIddaaMs = 0L
+    private var lastNesineAttemptMs = 0L
+    private var lastSuccessfulNesineMs = 0L
+    private var lastBilyonerAttemptMs = 0L
+    private var lastSuccessfulBilyonerMs = 0L
     private val pollMutex = Mutex()
     private val finishedDateFixturesCache = mutableMapOf<String, List<MatchLiveScore>>()
 
@@ -193,9 +270,22 @@ class SporTotoBulletinRepositoryImpl(
     override val liveScores: StateFlow<List<MatchLiveScore>> = _liveScores.asStateFlow()
 
     private val _activeLiveScoreSource = MutableStateFlow(
-        preferences?.getString("live_score_source", null)?.let { saved ->
-            LiveScoreSource.values().firstOrNull { it.name == saved }
-        } ?: initialSource
+        if (enforceNesineOnly) {
+            LiveScoreSource.NESINE_RESULTS
+        } else {
+            val migrationVersion = preferences?.getInt("source_migration_v", 0) ?: 0
+            if (migrationVersion < 2 && preferences != null) {
+                preferences.edit()
+                    .putInt("source_migration_v", 2)
+                    .putString("live_score_source", initialSource.name)
+                    .apply()
+            }
+            val saved = preferences?.getString("live_score_source", null)?.let { name ->
+                LiveScoreSource.values().firstOrNull { it.name == name }
+            }
+            val candidate = saved ?: initialSource
+            if (candidate in allowedSources) candidate else allowedSources.firstOrNull() ?: initialSource
+        }
     )
     override val activeLiveScoreSource: StateFlow<LiveScoreSource> = _activeLiveScoreSource.asStateFlow()
 
@@ -206,17 +296,33 @@ class SporTotoBulletinRepositoryImpl(
     override val previousWeekReport: StateFlow<PreviousWeekBulletinReport?> = _previousWeekReport.asStateFlow()
 
     override fun setLiveScoreSource(source: LiveScoreSource) {
-        if (_activeLiveScoreSource.value != source) {
-            _activeLiveScoreSource.value = source
-            _liveScoreProvider.value = source.displayName
+        if (enforceNesineOnly) {
+            _activeLiveScoreSource.value = LiveScoreSource.NESINE_RESULTS
+            _liveScoreProvider.value = LiveScoreSource.NESINE_RESULTS.displayName
+            return
+        }
+        val target = if (source in allowedSources) {
+            source
+        } else {
+            allowedSources.firstOrNull() ?: return
+        }
+        if (_activeLiveScoreSource.value != target) {
+            _activeLiveScoreSource.value = target
+            _liveScoreProvider.value = target.displayName
             _liveScores.value = emptyList()
             _previousWeekReport.value = null
             lastAttemptMs = 0L
             lastSuccessfulRequestMs = 0L
             lastEspnAttemptMs = 0L
             lastSuccessfulEspnMs = 0L
+            lastIddaaAttemptMs = 0L
+            lastSuccessfulIddaaMs = 0L
+            lastNesineAttemptMs = 0L
+            lastSuccessfulNesineMs = 0L
+            lastBilyonerAttemptMs = 0L
+            lastSuccessfulBilyonerMs = 0L
             finishedDateFixturesCache.clear()
-            preferences?.edit()?.putString("live_score_source", source.name)?.apply()
+            preferences?.edit()?.putString("live_score_source", target.name)?.apply()
         }
     }
 
@@ -288,6 +394,15 @@ class SporTotoBulletinRepositoryImpl(
             pollMutex.withLock {
                 if (_activeLiveScoreSource.value == LiveScoreSource.ESPN) {
                     return@withLock pollLiveScoresFromEspnLocked()
+                }
+                if (_activeLiveScoreSource.value == LiveScoreSource.NESINE_RESULTS) {
+                    return@withLock pollLiveScoresFromNesineLocked()
+                }
+                if (_activeLiveScoreSource.value == LiveScoreSource.BILYONER_LIVE) {
+                    return@withLock pollLiveScoresFromBilyonerLocked(force = false)
+                }
+                if (_activeLiveScoreSource.value == LiveScoreSource.IDDAA_SCRAPE) {
+                    return@withLock pollLiveScoresFromIddaaLocked()
                 }
                 fun unavailable(message: String): Result<List<MatchLiveScore>> {
                     _liveScores.value = emptyList()
@@ -510,8 +625,14 @@ class SporTotoBulletinRepositoryImpl(
     override suspend fun syncTurkishLeagueBulletinFromApi(): Result<WeeklyBulletinResponse> =
         withContext(Dispatchers.IO) {
             pollMutex.withLock {
+                if (enforceNesineOnly || _activeLiveScoreSource.value == LiveScoreSource.NESINE_RESULTS) {
+                    return@withLock scrapeNesineBulletinLocked()
+                }
                 if (_activeLiveScoreSource.value == LiveScoreSource.ESPN) {
                     return@withLock syncTurkishLeagueBulletinFromEspnLocked()
+                }
+                if (_activeLiveScoreSource.value == LiveScoreSource.IDDAA_SCRAPE) {
+                    return@withLock scrapeIddaaLiveBulletinLocked()
                 }
                 val key = configuredApiKey
                 if (key.isBlank()) {
@@ -697,6 +818,12 @@ class SporTotoBulletinRepositoryImpl(
                     }
                 }
 
+                if (resolvedBilyonerSporTotoScraper != null && !enforceNesineOnly) {
+                    return@withLock fetchPreviousWeekFromBilyonerLocked()
+                }
+                if (enforceNesineOnly || LiveScoreSource.ESPN !in allowedSources) {
+                    return@withLock fetchPreviousWeekFromNesineLocked()
+                }
                 if (_activeLiveScoreSource.value == LiveScoreSource.ESPN || configuredApiKey.isBlank()) {
                     return@withLock fetchPreviousWeekFromEspnLocked()
                 }
@@ -1241,6 +1368,785 @@ class SporTotoBulletinRepositoryImpl(
         }
     }
 
+    override suspend fun scrapeIddaaLiveBulletin(): Result<WeeklyBulletinResponse> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                scrapeIddaaLiveBulletinLocked()
+            }
+        }
+
+    private suspend fun pollLiveScoresFromIddaaLocked(): Result<List<MatchLiveScore>> {
+        val now = System.currentTimeMillis()
+        if (com.example.network.HeadlessWebViewSupport.isCrashCooldownActive(now)) {
+            return Result.success(_liveScores.value)
+        }
+        val cooldownMs = if (lastSuccessfulIddaaMs == lastIddaaAttemptMs) 45_000L else 35_000L
+        if (lastIddaaAttemptMs > 0L && now - lastIddaaAttemptMs < cooldownMs) {
+            return Result.success(_liveScores.value)
+        }
+        lastIddaaAttemptMs = now
+        val scrapeRes = iddaaScraper.scrapeLiveFootball(IDDAA_LIVE_FOOTBALL_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val rawScores = payload.matches.mapIndexed { idx, scraped ->
+                    scraped.toMatchLiveScore(idx + 1)
+                }
+                val bulletinMatches = _cachedBulletin.value?.matches.orEmpty().map { it.toDomainTotoMatch() }
+                val aligned = if (bulletinMatches.isNotEmpty()) {
+                    val matched = CouponPoolEvaluator.filterAndAlignToBulletin(bulletinMatches, rawScores)
+                    if (matched.isNotEmpty()) matched else rawScores
+                } else {
+                    rawScores.sortedWith(
+                        compareByDescending<MatchLiveScore> { it.isLive }
+                            .thenBy { it.status == MatchStatus.UPCOMING }
+                    )
+                }
+                _liveScoreProvider.value = "İddaa.com (${payload.methodLabel})"
+                _liveScores.value = aligned
+                lastSuccessfulIddaaMs = lastIddaaAttemptMs
+                Result.success(aligned)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "iddaa.com/canli-skor/futbol canlı scraping başarısız."
+                    )
+                )
+            }
+        )
+    }
+
+    private suspend fun scrapeIddaaLiveBulletinLocked(): Result<WeeklyBulletinResponse> {
+        val scrapeRes = iddaaScraper.scrapeLiveFootball(IDDAA_LIVE_FOOTBALL_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
+                val now = System.currentTimeMillis()
+                val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
+                val year = cal.get(java.util.Calendar.YEAR)
+                val month = cal.get(java.util.Calendar.MONTH) + 1
+                val season = if (month >= 7) year else year - 1
+                val weekNum = cal.get(java.util.Calendar.WEEK_OF_YEAR).coerceIn(1, 53)
+
+                // Prioritize Turkish Süper Lig, then 1. Lig, and active live/upcoming fixtures when assembling 15-match bulletin
+                val sortedScraped = payload.matches.sortedWith(
+                    compareByDescending<IddaaScrapedMatch> { m ->
+                        when {
+                            m.league.contains("Süper Lig", ignoreCase = true) -> 2
+                            m.league.contains("1. Lig", ignoreCase = true) ||
+                                m.league.contains("Türkiye", ignoreCase = true) -> 1
+                            else -> 0
+                        }
+                    }.thenByDescending { m ->
+                        m.status == MatchStatus.LIVE || m.status == MatchStatus.HALF_TIME
+                    }.thenBy { m ->
+                        m.status == MatchStatus.FINISHED
+                    }
+                )
+
+                val bulletinMatches = mutableListOf<BulletinMatchDto>()
+                sortedScraped.take(15).forEachIndexed { idx, item ->
+                    bulletinMatches.add(item.toBulletinMatchDto(idx + 1))
+                }
+
+                if (bulletinMatches.size < 15) {
+                    val trLocale = Locale.forLanguageTag("tr-TR")
+                    val fallbackMatches = NetworkModule.createTurkishLeagueSporTotoBulletin(weekNum).matches
+                    val existingPairs = bulletinMatches.map {
+                        "${it.homeTeam.lowercase(trLocale)}|${it.awayTeam.lowercase(trLocale)}"
+                    }.toMutableSet()
+                    for (candidate in fallbackMatches) {
+                        if (bulletinMatches.size >= 15) break
+                        val pair = "${candidate.homeTeam.lowercase(trLocale)}|${candidate.awayTeam.lowercase(trLocale)}"
+                        if (existingPairs.add(pair)) {
+                            bulletinMatches.add(candidate.copy(matchNumber = bulletinMatches.size + 1))
+                        }
+                    }
+                }
+
+                val finalMatches = bulletinMatches.take(15).mapIndexed { index, dto ->
+                    dto.copy(matchNumber = index + 1)
+                }
+                val startDate = finalMatches.firstOrNull()?.matchDate?.substringBefore(" ")
+                    ?: SimpleDateFormat("dd.MM.yyyy", Locale.US).apply { timeZone = istanbulTz }.format(Date(now))
+                val endDate = finalMatches.lastOrNull()?.matchDate?.substringBefore(" ") ?: startDate
+
+                val bulletin = WeeklyBulletinResponse(
+                    weekNumber = weekNum,
+                    season = "$season-${season + 1}",
+                    bulletinTitle = "İddaa Canlı Bülten $weekNum. Hafta (${sortedScraped.size} Maç Scrape)",
+                    startDate = startDate,
+                    endDate = endDate,
+                    jackpotEstimateTL = 0.0,
+                    isActive = true,
+                    matches = finalMatches
+                )
+                _cachedBulletin.value = bulletin
+
+                val rawScores = payload.matches.mapIndexed { idx, scraped ->
+                    scraped.toMatchLiveScore(idx + 1)
+                }
+                val domainMatches = finalMatches.map { it.toDomainTotoMatch() }
+                val aligned = CouponPoolEvaluator.filterAndAlignToBulletin(domainMatches, rawScores)
+                val effectiveScores = if (aligned.isNotEmpty()) aligned else rawScores
+                _activeLiveScoreSource.value = LiveScoreSource.IDDAA_SCRAPE
+                preferences?.edit()?.putString("live_score_source", LiveScoreSource.IDDAA_SCRAPE.name)?.apply()
+                _liveScoreProvider.value = "İddaa.com (${payload.methodLabel})"
+                _liveScores.value = effectiveScores
+                lastIddaaAttemptMs = now
+                lastSuccessfulIddaaMs = now
+                Result.success(bulletin)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "iddaa.com/canli-skor/futbol adresinden bülten çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
+    override suspend fun scrapeNesineBulletin(
+        forceRefresh: Boolean
+    ): Result<WeeklyBulletinResponse> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                if (!forceRefresh && _cachedBulletin.value.isPlayable()) {
+                    return@withLock Result.success(_cachedBulletin.value!!)
+                }
+                scrapeNesineBulletinLocked()
+            }
+        }
+
+    override suspend fun scrapeNesineResultsAndBulletin(
+        updateBulletin: Boolean
+    ): Result<WeeklyBulletinResponse> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                scrapeNesineResultsAndBulletinLocked(updateBulletin)
+            }
+        }
+
+    private suspend fun scrapeNesineBulletinLocked(): Result<WeeklyBulletinResponse> {
+        val scrapeRes = nesineScraper.scrapeBulletin(NESINE_SPORTOTO_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                if ((enforceNesineOnly || !allowOfflineBulletinFallback) && payload.matches.size < 15) {
+                    return Result.failure(
+                        IllegalStateException(
+                            "nesine.com/sportoto üzerinde 15 maçlık aktif bülten bulunamadı (${payload.matches.size} maç)."
+                        )
+                    )
+                }
+                val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
+                val now = System.currentTimeMillis()
+                val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
+                val year = cal.get(java.util.Calendar.YEAR)
+                val month = cal.get(java.util.Calendar.MONTH) + 1
+                val season = if (month >= 7) year else year - 1
+                val weekNum = (payload.weekNumber ?: cal.get(java.util.Calendar.WEEK_OF_YEAR)).coerceIn(1, 9999)
+
+                val bulletinMatches = payload.matches.take(15).mapIndexed { idx, scraped ->
+                    scraped.toBulletinMatchDto().copy(matchNumber = idx + 1)
+                }.toMutableList()
+
+                if (!enforceNesineOnly && allowOfflineBulletinFallback && bulletinMatches.size < 15) {
+                    val trLocale = Locale.forLanguageTag("tr-TR")
+                    val fallbackMatches = NetworkModule.createTurkishLeagueSporTotoBulletin(weekNum).matches
+                    val existingPairs = bulletinMatches.map {
+                        "${it.homeTeam.lowercase(trLocale)}|${it.awayTeam.lowercase(trLocale)}"
+                    }.toMutableSet()
+                    for (candidate in fallbackMatches) {
+                        if (bulletinMatches.size >= 15) break
+                        val pair = "${candidate.homeTeam.lowercase(trLocale)}|${candidate.awayTeam.lowercase(trLocale)}"
+                        if (existingPairs.add(pair)) {
+                            bulletinMatches.add(candidate.copy(matchNumber = bulletinMatches.size + 1))
+                        }
+                    }
+                }
+
+                val finalMatches = bulletinMatches.take(15).mapIndexed { index, dto ->
+                    dto.copy(matchNumber = index + 1)
+                }
+                val startDate = finalMatches.firstOrNull()?.matchDate?.substringBefore(" ")
+                    ?: SimpleDateFormat("dd.MM.yyyy", Locale.US).apply { timeZone = istanbulTz }.format(Date(now))
+                val endDate = finalMatches.lastOrNull()?.matchDate?.substringBefore(" ") ?: startDate
+                val titleSuffix = payload.weekTitle.takeIf { it.isNotBlank() } ?: "$weekNum. Hafta"
+
+                val bulletin = WeeklyBulletinResponse(
+                    weekNumber = weekNum,
+                    season = "$season-${season + 1}",
+                    bulletinTitle = "Nesine Spor Toto $titleSuffix",
+                    startDate = startDate,
+                    endDate = endDate,
+                    jackpotEstimateTL = 0.0,
+                    isActive = true,
+                    matches = finalMatches
+                )
+                _cachedBulletin.value = bulletin
+                _activeLiveScoreSource.value = LiveScoreSource.NESINE_RESULTS
+                preferences?.edit()?.putString("live_score_source", LiveScoreSource.NESINE_RESULTS.name)?.apply()
+
+                val rawScores = payload.matches.map { it.toMatchLiveScore() }
+                if (rawScores.any { it.homeScore != null && it.awayScore != null }) {
+                    val domainMatches = finalMatches.map { it.toDomainTotoMatch() }
+                    val aligned = CouponPoolEvaluator.filterAndAlignToBulletin(domainMatches, rawScores)
+                    if (aligned.isNotEmpty()) {
+                        _liveScoreProvider.value = "Nesine.com (${payload.methodLabel})"
+                        _liveScores.value = aligned
+                        lastNesineAttemptMs = now
+                        lastSuccessfulNesineMs = now
+                    }
+                }
+                Result.success(bulletin)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "nesine.com/sportoto adresinden bülten çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
+    private suspend fun pollLiveScoresFromNesineLocked(): Result<List<MatchLiveScore>> {
+        val now = System.currentTimeMillis()
+        if (com.example.network.HeadlessWebViewSupport.isCrashCooldownActive(now)) {
+            return Result.success(_liveScores.value)
+        }
+        val cooldownMs = if (lastSuccessfulNesineMs == lastNesineAttemptMs) 45_000L else 35_000L
+        if (lastNesineAttemptMs > 0L && now - lastNesineAttemptMs < cooldownMs) {
+            return Result.success(_liveScores.value)
+        }
+        lastNesineAttemptMs = now
+        val scrapeRes = nesineScraper.scrapeResults(NESINE_SPORTOTO_RESULTS_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val rawScores = payload.matches.map { it.toMatchLiveScore() }
+                val bulletinMatches = _cachedBulletin.value?.matches.orEmpty().map { it.toDomainTotoMatch() }
+                val aligned = if (bulletinMatches.isNotEmpty()) {
+                    val matched = CouponPoolEvaluator.filterAndAlignToBulletin(bulletinMatches, rawScores)
+                    if (matched.isNotEmpty()) matched else rawScores
+                } else {
+                    rawScores
+                }
+                _liveScoreProvider.value = "Nesine.com (${payload.methodLabel})"
+                _liveScores.value = aligned
+                lastSuccessfulNesineMs = lastNesineAttemptMs
+                Result.success(aligned)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "nesine.com/sportoto/mac-sonuclari anlık sonuç çekme başarısız."
+                    )
+                )
+            }
+        )
+    }
+
+    private suspend fun scrapeNesineResultsAndBulletinLocked(
+        updateBulletin: Boolean
+    ): Result<WeeklyBulletinResponse> {
+        val scrapeRes = nesineScraper.scrapeResults(NESINE_SPORTOTO_RESULTS_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                if ((enforceNesineOnly || !allowOfflineBulletinFallback) &&
+                    updateBulletin && payload.matches.size < 15 &&
+                    !_cachedBulletin.value.isPlayable()
+                ) {
+                    return Result.failure(
+                        IllegalStateException(
+                            "nesine.com/sportoto/mac-sonuclari üzerinde 15 maçlık liste bulunamadı (${payload.matches.size} maç)."
+                        )
+                    )
+                }
+                val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
+                val now = System.currentTimeMillis()
+                val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
+                val year = cal.get(java.util.Calendar.YEAR)
+                val month = cal.get(java.util.Calendar.MONTH) + 1
+                val season = if (month >= 7) year else year - 1
+                val weekNum = (payload.weekNumber ?: cal.get(java.util.Calendar.WEEK_OF_YEAR)).coerceIn(1, 9999)
+
+                val existingBulletin = _cachedBulletin.value
+                val finalBulletin = if ((updateBulletin && payload.matches.size >= 15) ||
+                    (resolvedBilyonerSporTotoScraper == null && (existingBulletin == null || !existingBulletin.isPlayable()))
+                ) {
+                    val bulletinMatches = payload.matches.take(15).mapIndexed { idx, scraped ->
+                        scraped.toBulletinMatchDto().copy(matchNumber = idx + 1)
+                    }.toMutableList()
+
+                    if (!enforceNesineOnly && allowOfflineBulletinFallback && bulletinMatches.size < 15) {
+                        val trLocale = Locale.forLanguageTag("tr-TR")
+                        val fallbackMatches = NetworkModule.createTurkishLeagueSporTotoBulletin(weekNum).matches
+                        val existingPairs = bulletinMatches.map {
+                            "${it.homeTeam.lowercase(trLocale)}|${it.awayTeam.lowercase(trLocale)}"
+                        }.toMutableSet()
+                        for (candidate in fallbackMatches) {
+                            if (bulletinMatches.size >= 15) break
+                            val pair = "${candidate.homeTeam.lowercase(trLocale)}|${candidate.awayTeam.lowercase(trLocale)}"
+                            if (existingPairs.add(pair)) {
+                                bulletinMatches.add(candidate.copy(matchNumber = bulletinMatches.size + 1))
+                            }
+                        }
+                    }
+
+                    val finalMatches = bulletinMatches.take(15).mapIndexed { index, dto ->
+                        dto.copy(matchNumber = index + 1)
+                    }
+                    val startDate = finalMatches.firstOrNull()?.matchDate?.substringBefore(" ")
+                        ?: SimpleDateFormat("dd.MM.yyyy", Locale.US).apply { timeZone = istanbulTz }.format(Date(now))
+                    val endDate = finalMatches.lastOrNull()?.matchDate?.substringBefore(" ") ?: startDate
+                    val titleSuffix = payload.weekTitle.takeIf { it.isNotBlank() } ?: "$weekNum. Hafta"
+
+                    WeeklyBulletinResponse(
+                        weekNumber = weekNum,
+                        season = "$season-${season + 1}",
+                        bulletinTitle = "Nesine Spor Toto $titleSuffix (${payload.matches.size} Maç)",
+                        startDate = startDate,
+                        endDate = endDate,
+                        jackpotEstimateTL = 0.0,
+                        isActive = true,
+                        matches = finalMatches
+                    ).also { _cachedBulletin.value = it }
+                } else {
+                    existingBulletin ?: WeeklyBulletinResponse(
+                        weekNumber = weekNum,
+                        season = "$season-${season + 1}",
+                        bulletinTitle = "",
+                        startDate = "",
+                        endDate = "",
+                        jackpotEstimateTL = 0.0,
+                        isActive = false,
+                        matches = emptyList()
+                    )
+                }
+
+                val rawScores = payload.matches.map { it.toMatchLiveScore() }
+                val domainMatches = finalBulletin.matches.map { it.toDomainTotoMatch() }
+                val aligned = CouponPoolEvaluator.filterAndAlignToBulletin(domainMatches, rawScores)
+                val effectiveScores = if (aligned.isNotEmpty()) aligned else rawScores
+
+                _activeLiveScoreSource.value = LiveScoreSource.NESINE_RESULTS
+                preferences?.edit()?.putString("live_score_source", LiveScoreSource.NESINE_RESULTS.name)?.apply()
+                _liveScoreProvider.value = "Nesine.com (${payload.methodLabel})"
+                _liveScores.value = effectiveScores
+                lastNesineAttemptMs = now
+                lastSuccessfulNesineMs = now
+                Result.success(finalBulletin)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "nesine.com/sportoto/mac-sonuclari adresinden sonuçlar çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
+    override suspend fun scrapeBilyonerLiveScores(
+        forceRefresh: Boolean
+    ): Result<List<MatchLiveScore>> = withContext(Dispatchers.IO) {
+        pollMutex.withLock {
+            if (!enforceNesineOnly && LiveScoreSource.BILYONER_LIVE in allowedSources) {
+                _activeLiveScoreSource.value = LiveScoreSource.BILYONER_LIVE
+                preferences?.edit()?.putString("live_score_source", LiveScoreSource.BILYONER_LIVE.name)?.apply()
+            }
+            pollLiveScoresFromBilyonerLocked(force = forceRefresh)
+        }
+    }
+
+    override suspend fun scrapeBilyonerLiveBulletin(): Result<WeeklyBulletinResponse> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                scrapeBilyonerLiveBulletinLocked()
+            }
+        }
+
+    override suspend fun scrapeBilyonerSporTotoBulletin(): Result<WeeklyBulletinResponse> =
+        withContext(Dispatchers.IO) {
+            pollMutex.withLock {
+                scrapeBilyonerLiveBulletinLocked()
+            }
+        }
+
+    private suspend fun pollLiveScoresFromBilyonerLocked(force: Boolean): Result<List<MatchLiveScore>> {
+        val now = System.currentTimeMillis()
+        if (force) {
+            com.example.network.HeadlessWebViewSupport.clearCrashCooldown()
+        } else if (com.example.network.HeadlessWebViewSupport.isCrashCooldownActive(now)) {
+            return Result.success(_liveScores.value)
+        }
+        val cooldownMs = if (lastSuccessfulBilyonerMs == lastBilyonerAttemptMs) 45_000L else 35_000L
+        if (!force && lastBilyonerAttemptMs > 0L && now - lastBilyonerAttemptMs < cooldownMs) {
+            return Result.success(_liveScores.value)
+        }
+        lastBilyonerAttemptMs = now
+        val scrapeRes = bilyonerScraper.scrapeLiveScoreboard(BILYONER_LIVE_SCORE_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val rawScores = payload.matches.mapIndexed { idx, scraped ->
+                    scraped.toMatchLiveScore(idx + 1)
+                }
+                val bulletinMatches = _cachedBulletin.value?.matches.orEmpty().map { it.toDomainTotoMatch() }
+                val mergedScores = mergeBilyonerWithBulletin(bulletinMatches, rawScores)
+                _liveScoreProvider.value = "Bilyoner.com (${payload.methodLabel})"
+                _liveScores.value = mergedScores
+                lastSuccessfulBilyonerMs = lastBilyonerAttemptMs
+                Result.success(mergedScores)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "bilyoner.com/canli-skor canlı veri çekme başarısız."
+                    )
+                )
+            }
+        )
+    }
+
+    private fun mergeBilyonerWithBulletin(
+        bulletinMatches: List<TotoMatch>,
+        rawScores: List<MatchLiveScore>
+    ): List<MatchLiveScore> {
+        val alignedBulletin = if (bulletinMatches.isNotEmpty()) {
+            CouponPoolEvaluator.filterAndAlignToBulletin(bulletinMatches, rawScores)
+        } else {
+            emptyList()
+        }
+        val alignedKeys = alignedBulletin.map {
+            "${it.homeTeam.lowercase(Locale.ROOT)}|${it.awayTeam.lowercase(Locale.ROOT)}"
+        }.toSet()
+        val extraBilyoner = rawScores.filter { score ->
+            "${score.homeTeam.lowercase(Locale.ROOT)}|${score.awayTeam.lowercase(Locale.ROOT)}" !in alignedKeys
+        }.sortedWith(
+            compareByDescending<MatchLiveScore> { it.isLive }
+                .thenBy { it.status == MatchStatus.FINISHED }
+                .thenBy { it.matchDate }
+        )
+        return alignedBulletin + extraBilyoner
+    }
+
+    private suspend fun scrapeBilyonerLiveBulletinLocked(): Result<WeeklyBulletinResponse> {
+        val sporTotoScraper = resolvedBilyonerSporTotoScraper
+        if (sporTotoScraper != null) {
+            val totoRes = sporTotoScraper.scrapeBulletin(BILYONER_SPORTOTO_URL)
+            return totoRes.fold(
+                onSuccess = { payload ->
+                    if ((!allowOfflineBulletinFallback || enforceNesineOnly) && payload.matches.size < 15) {
+                        return Result.failure(
+                            IllegalStateException(
+                                "bilyoner.com/spor-toto üzerinde 15 maçlık bülten bulunamadı (${payload.matches.size} maç)."
+                            )
+                        )
+                    }
+                    val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
+                    val now = System.currentTimeMillis()
+                    val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
+                    val year = cal.get(java.util.Calendar.YEAR)
+                    val month = cal.get(java.util.Calendar.MONTH) + 1
+                    val season = if (month >= 7) year else year - 1
+                    val weekNum = (payload.weekNumber ?: cal.get(java.util.Calendar.WEEK_OF_YEAR)).coerceIn(1, 9999)
+
+                    val bulletinMatches = payload.matches.take(15).mapIndexed { idx, scraped ->
+                        scraped.toBulletinMatchDto().copy(matchNumber = idx + 1)
+                    }.toMutableList()
+
+                    if (allowOfflineBulletinFallback && !enforceNesineOnly && bulletinMatches.size < 15) {
+                        val trLocale = Locale.forLanguageTag("tr-TR")
+                        val fallbackMatches = NetworkModule.createTurkishLeagueSporTotoBulletin(weekNum).matches
+                        val existingPairs = bulletinMatches.map {
+                            "${it.homeTeam.lowercase(trLocale)}|${it.awayTeam.lowercase(trLocale)}"
+                        }.toMutableSet()
+                        for (candidate in fallbackMatches) {
+                            if (bulletinMatches.size >= 15) break
+                            val pair = "${candidate.homeTeam.lowercase(trLocale)}|${candidate.awayTeam.lowercase(trLocale)}"
+                            if (existingPairs.add(pair)) {
+                                bulletinMatches.add(candidate.copy(matchNumber = bulletinMatches.size + 1))
+                            }
+                        }
+                    }
+
+                    val finalMatches = bulletinMatches.take(15).mapIndexed { idx, dto ->
+                        dto.copy(matchNumber = idx + 1)
+                    }
+                    val startDate = finalMatches.firstOrNull()?.matchDate?.substringBefore(" ")
+                        ?: SimpleDateFormat("dd.MM.yyyy", Locale.US).apply { timeZone = istanbulTz }.format(Date(now))
+                    val endDate = finalMatches.lastOrNull()?.matchDate?.substringBefore(" ") ?: startDate
+                    val titleSuffix = payload.weekTitle.takeIf { it.isNotBlank() } ?: "$weekNum. Hafta"
+
+                    val bulletin = WeeklyBulletinResponse(
+                        weekNumber = weekNum,
+                        season = "$season-${season + 1}",
+                        bulletinTitle = "Bilyoner Spor Toto $titleSuffix (${finalMatches.size} Maç)",
+                        startDate = startDate,
+                        endDate = endDate,
+                        jackpotEstimateTL = 0.0,
+                        isActive = true,
+                        matches = finalMatches
+                    )
+                    _cachedBulletin.value = bulletin
+
+                    val domainMatches = finalMatches.map { it.toDomainTotoMatch() }
+                    val existingScores = _liveScores.value
+                    val baseScores = if (existingScores.isNotEmpty()) {
+                        mergeBilyonerWithBulletin(domainMatches, existingScores)
+                    } else {
+                        payload.matches.take(15).mapIndexed { idx, scraped ->
+                            scraped.copy(matchNumber = idx + 1).toMatchLiveScore()
+                        }
+                    }
+                    if (!enforceNesineOnly && LiveScoreSource.BILYONER_LIVE in allowedSources) {
+                        _activeLiveScoreSource.value = LiveScoreSource.BILYONER_LIVE
+                        preferences?.edit()?.putString("live_score_source", LiveScoreSource.BILYONER_LIVE.name)?.apply()
+                    }
+                    _liveScoreProvider.value = "Bilyoner.com Spor Toto (${payload.methodLabel})"
+                    _liveScores.value = baseScores
+                    lastBilyonerAttemptMs = now
+                    lastSuccessfulBilyonerMs = now
+                    Result.success(bulletin)
+                },
+                onFailure = { err ->
+                    Result.failure(
+                        IllegalStateException(
+                            err.message ?: "bilyoner.com/spor-toto üzerinden bülten çekilemedi."
+                        )
+                    )
+                }
+            )
+        }
+
+        return scrapeBilyonerScoreboardBulletinLocked()
+    }
+
+    private suspend fun scrapeBilyonerScoreboardBulletinLocked(): Result<WeeklyBulletinResponse> {
+        val scrapeRes = bilyonerScraper.scrapeLiveScoreboard(BILYONER_LIVE_SCORE_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                if ((!allowOfflineBulletinFallback || enforceNesineOnly) && payload.matches.size < 15) {
+                    return Result.failure(
+                        IllegalStateException(
+                            "bilyoner.com/canli-skor üzerinde 15 maçlık bülten için yeterli maç bulunamadı (${payload.matches.size} maç)."
+                        )
+                    )
+                }
+                val istanbulTz = TimeZone.getTimeZone("Europe/Istanbul")
+                val now = System.currentTimeMillis()
+                val cal = java.util.Calendar.getInstance(istanbulTz).apply { timeInMillis = now }
+                val year = cal.get(java.util.Calendar.YEAR)
+                val month = cal.get(java.util.Calendar.MONTH) + 1
+                val season = if (month >= 7) year else year - 1
+                val weekNum = cal.get(java.util.Calendar.WEEK_OF_YEAR).coerceIn(1, 53)
+
+                val sortedScraped = payload.matches.sortedWith(
+                    compareByDescending<BilyonerScrapedMatch> { m ->
+                        when {
+                            m.league.contains("Süper Lig", ignoreCase = true) -> 3
+                            m.league.contains("1. Lig", ignoreCase = true) ||
+                                m.league.contains("Türkiye", ignoreCase = true) -> 2
+                            m.league.contains("Uluslar", ignoreCase = true) ||
+                                m.league.contains("Şampiyonlar", ignoreCase = true) ||
+                                m.league.contains("Avrupa", ignoreCase = true) -> 1
+                            else -> 0
+                        }
+                    }.thenByDescending { m ->
+                        m.status == MatchStatus.LIVE || m.status == MatchStatus.HALF_TIME
+                    }.thenBy { m ->
+                        m.status == MatchStatus.FINISHED
+                    }
+                )
+
+                val bulletinMatches = sortedScraped.take(15).mapIndexed { idx, item ->
+                    item.toBulletinMatchDto(idx + 1)
+                }.toMutableList()
+
+                if (allowOfflineBulletinFallback && !enforceNesineOnly && bulletinMatches.size < 15) {
+                    val trLocale = Locale.forLanguageTag("tr-TR")
+                    val fallbackMatches = NetworkModule.createTurkishLeagueSporTotoBulletin(weekNum).matches
+                    val existingPairs = bulletinMatches.map {
+                        "${it.homeTeam.lowercase(trLocale)}|${it.awayTeam.lowercase(trLocale)}"
+                    }.toMutableSet()
+                    for (candidate in fallbackMatches) {
+                        if (bulletinMatches.size >= 15) break
+                        val pair = "${candidate.homeTeam.lowercase(trLocale)}|${candidate.awayTeam.lowercase(trLocale)}"
+                        if (existingPairs.add(pair)) {
+                            bulletinMatches.add(candidate.copy(matchNumber = bulletinMatches.size + 1))
+                        }
+                    }
+                }
+
+                val finalMatches = bulletinMatches.take(15).mapIndexed { idx, dto ->
+                    dto.copy(matchNumber = idx + 1)
+                }
+                val startDate = finalMatches.firstOrNull()?.matchDate?.substringBefore(" ")
+                    ?: SimpleDateFormat("dd.MM.yyyy", Locale.US).apply { timeZone = istanbulTz }.format(Date(now))
+                val endDate = finalMatches.lastOrNull()?.matchDate?.substringBefore(" ") ?: startDate
+
+                val bulletin = WeeklyBulletinResponse(
+                    weekNumber = weekNum,
+                    season = "$season-${season + 1}",
+                    bulletinTitle = "Bilyoner Canlı Bülten $weekNum. Hafta (${payload.matches.size} Maç)",
+                    startDate = startDate,
+                    endDate = endDate,
+                    jackpotEstimateTL = 0.0,
+                    isActive = true,
+                    matches = finalMatches
+                )
+                _cachedBulletin.value = bulletin
+
+                val rawScores = payload.matches.mapIndexed { idx, scraped ->
+                    scraped.toMatchLiveScore(idx + 1)
+                }
+                val domainMatches = finalMatches.map { it.toDomainTotoMatch() }
+                val merged = mergeBilyonerWithBulletin(domainMatches, rawScores)
+
+                if (!enforceNesineOnly && LiveScoreSource.BILYONER_LIVE in allowedSources) {
+                    _activeLiveScoreSource.value = LiveScoreSource.BILYONER_LIVE
+                    preferences?.edit()?.putString("live_score_source", LiveScoreSource.BILYONER_LIVE.name)?.apply()
+                }
+                _liveScoreProvider.value = "Bilyoner.com (${payload.methodLabel})"
+                _liveScores.value = merged
+                lastBilyonerAttemptMs = now
+                lastSuccessfulBilyonerMs = now
+                Result.success(bulletin)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "bilyoner.com/canli-skor üzerinden veriler çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
+    private suspend fun fetchPreviousWeekFromNesineLocked(): Result<PreviousWeekBulletinReport> {
+        val scrapeRes = nesineScraper.scrapeResults(NESINE_SPORTOTO_RESULTS_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val finishedMatches = payload.matches.filter {
+                    it.status == MatchStatus.FINISHED || (it.homeScore != null && it.awayScore != null)
+                }
+                if (finishedMatches.isEmpty()) {
+                    return Result.failure(
+                        IllegalStateException(
+                            "nesine.com/sportoto/mac-sonuclari sayfasında henüz tamamlanmış maç sonucu bulunamadı."
+                        )
+                    )
+                }
+                val weekNum = payload.weekNumber ?: 1
+                val mapped = finishedMatches.mapIndexed { idx, item ->
+                    val hg = item.homeScore
+                    val ag = item.awayScore
+                    val outcome = item.explicitOutcome ?: when {
+                        hg == null || ag == null -> null
+                        hg > ag -> PredictionOutcome.HOME
+                        hg == ag -> PredictionOutcome.DRAW
+                        else -> PredictionOutcome.AWAY
+                    }
+                    PastBulletinMatchResult(
+                        matchNumber = item.matchNumber.takeIf { it in 1..15 } ?: (idx + 1),
+                        homeTeam = item.homeTeam.uppercase(Locale.forLanguageTag("tr-TR")).trim(),
+                        awayTeam = item.awayTeam.uppercase(Locale.forLanguageTag("tr-TR")).trim(),
+                        matchDate = item.matchDate,
+                        league = item.league,
+                        homeScore = hg,
+                        awayScore = ag,
+                        status = if (item.status == MatchStatus.FINISHED) MatchStatus.FINISHED else item.status,
+                        winningOutcome = outcome
+                    )
+                }
+                val firstDay = mapped.firstOrNull()?.matchDate?.substringBefore(" ").orEmpty()
+                val lastDay = mapped.lastOrNull()?.matchDate?.substringBefore(" ") ?: firstDay
+                val report = PreviousWeekBulletinReport(
+                    weekNumber = weekNum,
+                    weekLabel = payload.weekTitle.ifBlank { "Nesine Spor Toto ($weekNum. Hafta)" },
+                    dateRangeLabel = if (firstDay.isNotBlank()) "$firstDay - $lastDay" else "Güncel Liste",
+                    sourceLabel = "Nesine.com (${payload.methodLabel})",
+                    matches = mapped.take(15),
+                    allFinishedMatches = mapped
+                )
+                _previousWeekReport.value = report
+                Result.success(report)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "nesine.com/sportoto/mac-sonuclari sonuç listesi çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
+    private suspend fun fetchPreviousWeekFromBilyonerLocked(): Result<PreviousWeekBulletinReport> {
+        val scraper = resolvedBilyonerSporTotoScraper
+            ?: return Result.failure(IllegalStateException("Bilyoner Spor Toto kazıyıcı tanımlı değil."))
+        val scrapeRes = scraper.scrapeResults(BILYONER_SPORTOTO_RESULTS_URL)
+        return scrapeRes.fold(
+            onSuccess = { payload ->
+                val finishedMatches = payload.matches.filter {
+                    it.status == MatchStatus.FINISHED ||
+                        (it.homeScore != null && it.awayScore != null) ||
+                        it.explicitOutcome != null
+                }
+                if (finishedMatches.isEmpty()) {
+                    return Result.failure(
+                        IllegalStateException(
+                            "bilyoner.com/spor-toto/sonuclar sayfasında geçen haftaya ait tamamlanmış maç sonucu bulunamadı."
+                        )
+                    )
+                }
+                val weekNum = payload.weekNumber ?: 1
+                val trLocale = Locale.forLanguageTag("tr-TR")
+                val mapped = finishedMatches.mapIndexed { idx, item ->
+                    val hg = item.homeScore
+                    val ag = item.awayScore
+                    val outcome = item.explicitOutcome ?: when {
+                        hg == null || ag == null -> null
+                        hg > ag -> PredictionOutcome.HOME
+                        hg == ag -> PredictionOutcome.DRAW
+                        else -> PredictionOutcome.AWAY
+                    }
+                    PastBulletinMatchResult(
+                        matchNumber = item.matchNumber.takeIf { it in 1..15 } ?: (idx + 1),
+                        homeTeam = item.homeTeam.uppercase(trLocale).trim(),
+                        awayTeam = item.awayTeam.uppercase(trLocale).trim(),
+                        matchDate = item.matchDate,
+                        league = item.league,
+                        homeScore = hg,
+                        awayScore = ag,
+                        status = if (item.status == MatchStatus.FINISHED || outcome != null) MatchStatus.FINISHED else item.status,
+                        winningOutcome = outcome
+                    )
+                }
+                val firstDay = mapped.firstOrNull()?.matchDate?.substringBefore(" ").orEmpty()
+                val lastDay = mapped.lastOrNull()?.matchDate?.substringBefore(" ") ?: firstDay
+                val report = PreviousWeekBulletinReport(
+                    weekNumber = weekNum,
+                    weekLabel = payload.weekTitle.ifBlank { "Bilyoner Spor Toto ($weekNum. Hafta)" },
+                    dateRangeLabel = if (firstDay.isNotBlank()) "$firstDay - $lastDay" else "Geçen Hafta Sonuçları",
+                    sourceLabel = "bilyoner.com/spor-toto/sonuclar (${payload.methodLabel})",
+                    matches = mapped.take(15),
+                    allFinishedMatches = mapped
+                )
+                _previousWeekReport.value = report
+                Result.success(report)
+            },
+            onFailure = { err ->
+                Result.failure(
+                    IllegalStateException(
+                        err.message ?: "bilyoner.com/spor-toto/sonuclar üzerinden geçen hafta sonuçları çekilemedi."
+                    )
+                )
+            }
+        )
+    }
+
     override suspend fun fetchPreviousWeekFromEspn(
         forceRefresh: Boolean
     ): Result<PreviousWeekBulletinReport> =
@@ -1250,6 +2156,9 @@ class SporTotoBulletinRepositoryImpl(
                     _previousWeekReport.value?.let { cached ->
                         return@withLock Result.success(cached)
                     }
+                }
+                if (enforceNesineOnly || LiveScoreSource.ESPN !in allowedSources) {
+                    return@withLock fetchPreviousWeekFromNesineLocked()
                 }
                 fetchPreviousWeekFromEspnLocked()
             }
@@ -1534,6 +2443,61 @@ class SporTotoBulletinRepositoryImpl(
                     return@withContext Result.success(_cachedBulletin.value!!)
                 }
 
+                if (enforceNesineOnly || !allowOfflineBulletinFallback) {
+                    val bilyonerAllowed = !enforceNesineOnly && LiveScoreSource.BILYONER_LIVE in allowedSources
+                    val preferBilyonerFirst = bilyonerAllowed &&
+                        _activeLiveScoreSource.value == LiveScoreSource.BILYONER_LIVE
+                    if (preferBilyonerFirst) {
+                        val bilyonerBulletin = pollMutex.withLock {
+                            scrapeBilyonerLiveBulletinLocked()
+                        }
+                        if (bilyonerBulletin.isSuccess && bilyonerBulletin.getOrNull().isPlayable()) {
+                            return@withContext bilyonerBulletin
+                        }
+                        val nesineFallback = if (resolvedBilyonerSporTotoScraper == null &&
+                            (forceRefresh || !com.example.network.HeadlessWebViewSupport.isCrashCooldownActive())
+                        ) {
+                            pollMutex.withLock {
+                                scrapeNesineBulletinLocked()
+                            }
+                        } else {
+                            null
+                        }
+                        if (nesineFallback?.isSuccess == true && nesineFallback.getOrNull().isPlayable()) {
+                            return@withContext nesineFallback
+                        }
+                        _cachedBulletin.value = null
+                        val err = bilyonerBulletin.exceptionOrNull() ?: nesineFallback?.exceptionOrNull()
+                        return@withContext Result.failure(
+                            NoNewBulletinException(
+                                err?.message ?: "bilyoner.com/spor-toto üzerinden bülten çekilemedi."
+                            )
+                        )
+                    }
+
+                    val nesineBulletin = pollMutex.withLock {
+                        scrapeNesineBulletinLocked()
+                    }
+                    if (nesineBulletin.isSuccess && nesineBulletin.getOrNull().isPlayable()) {
+                        return@withContext nesineBulletin
+                    }
+                    if (bilyonerAllowed && (forceRefresh || !com.example.network.HeadlessWebViewSupport.isCrashCooldownActive())) {
+                        val bilyonerFallback = pollMutex.withLock {
+                            scrapeBilyonerLiveBulletinLocked()
+                        }
+                        if (bilyonerFallback.isSuccess && bilyonerFallback.getOrNull().isPlayable()) {
+                            return@withContext bilyonerFallback
+                        }
+                    }
+                    _cachedBulletin.value = null
+                    val err = nesineBulletin.exceptionOrNull()
+                    return@withContext Result.failure(
+                        NoNewBulletinException(
+                            err?.message ?: "nesine.com/sportoto üzerinden bülten çekilemedi."
+                        )
+                    )
+                }
+
                 // When using the default built-in endpoint with keyless ESPN enabled,
                 // automatically pull real scheduled/active matches from ESPN first.
                 if (apiService === NetworkModule.apiService &&
@@ -1544,6 +2508,33 @@ class SporTotoBulletinRepositoryImpl(
                     }
                     if (espnBulletin.isSuccess && espnBulletin.getOrNull().isPlayable()) {
                         return@withContext espnBulletin
+                    }
+                } else if (apiService === NetworkModule.apiService &&
+                    _activeLiveScoreSource.value == LiveScoreSource.NESINE_RESULTS
+                ) {
+                    val nesineBulletin = pollMutex.withLock {
+                        scrapeNesineBulletinLocked()
+                    }
+                    if (nesineBulletin.isSuccess && nesineBulletin.getOrNull().isPlayable()) {
+                        return@withContext nesineBulletin
+                    }
+                } else if (apiService === NetworkModule.apiService &&
+                    _activeLiveScoreSource.value == LiveScoreSource.BILYONER_LIVE
+                ) {
+                    val bilyonerBulletin = pollMutex.withLock {
+                        scrapeBilyonerLiveBulletinLocked()
+                    }
+                    if (bilyonerBulletin.isSuccess && bilyonerBulletin.getOrNull().isPlayable()) {
+                        return@withContext bilyonerBulletin
+                    }
+                } else if (apiService === NetworkModule.apiService &&
+                    _activeLiveScoreSource.value == LiveScoreSource.IDDAA_SCRAPE
+                ) {
+                    val iddaaBulletin = pollMutex.withLock {
+                        scrapeIddaaLiveBulletinLocked()
+                    }
+                    if (iddaaBulletin.isSuccess && iddaaBulletin.getOrNull().isPlayable()) {
+                        return@withContext iddaaBulletin
                     }
                 }
 
@@ -1577,7 +2568,7 @@ class SporTotoBulletinRepositoryImpl(
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
-                if (apiService === NetworkModule.apiService) {
+                if (!enforceNesineOnly && allowOfflineBulletinFallback && apiService === NetworkModule.apiService) {
                     val fallback = _cachedBulletin.value?.takeIf { it.isPlayable() }
                         ?: defaultOfflineBulletin()
                     _cachedBulletin.value = fallback

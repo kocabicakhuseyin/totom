@@ -164,7 +164,7 @@ internal fun PreviousWeekResultsCard(
     errorMessage: String?,
     hasApiKey: Boolean,
     requiresApiKey: Boolean = false,
-    providerLabel: String = "ESPN",
+    providerLabel: String = "Bilyoner",
     onLoadPreviousWeek: (forceRefresh: Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
@@ -280,8 +280,13 @@ internal fun PreviousWeekResultsCard(
                     }
                 }
             } else {
+                val isNesineProvider = providerLabel.contains("Nesine", ignoreCase = true)
                 Text(
-                    text = errorMessage ?: "Geçen haftanın Spor Toto bülten maçlarını ve kesinleşmiş maç sonuçlarını ESPN üzerinden anahtarsız çekebilirsiniz.",
+                    text = errorMessage ?: if (isNesineProvider) {
+                        "Geçen haftanın Spor Toto bülten maçlarını ve kesinleşmiş maç sonuçlarını nesine.com/sportoto/mac-sonuclari üzerinden çekebilirsiniz."
+                    } else {
+                        "Geçen haftanın Spor Toto maç sonuçlarını bilyoner.com/spor-toto/sonuclar üzerinden çekebilirsiniz."
+                    },
                     color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
                     fontSize = 12.sp,
                     lineHeight = 17.sp
@@ -297,7 +302,11 @@ internal fun PreviousWeekResultsCard(
                         .testTag("btn_load_previous_week")
                 ) {
                     Text(
-                        text = "🌐 Geçen Haftanın Sonuçlarını ESPN ile Çek",
+                        text = if (isNesineProvider) {
+                            "🎯 Sonuçları Nesine'den Çek"
+                        } else {
+                            "🟢 bilyoner.com/spor-toto/sonuclar'dan Çek"
+                        },
                         color = Color.Black,
                         fontWeight = FontWeight.Black,
                         fontSize = 12.sp
@@ -315,7 +324,7 @@ internal fun PreviousWeekBulletinDialog(
     errorMessage: String?,
     hasApiKey: Boolean,
     requiresApiKey: Boolean = false,
-    providerLabel: String = "ESPN",
+    providerLabel: String = "Bilyoner",
     onRefresh: () -> Unit,
     onNavigateToLiveTab: () -> Unit,
     onDismiss: () -> Unit
@@ -414,13 +423,17 @@ internal fun PreviousWeekBulletinDialog(
                     }
                 }
             } else {
+                val isNesineProvider = providerLabel.contains("Nesine", ignoreCase = true)
                 Column(
                     modifier = Modifier.fillMaxWidth(),
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
                     Text(
-                        text = errorMessage
-                            ?: "Geçen haftanın maç sonuçlarını ESPN üzerinden anahtarsız çekmek için Yenile butonuna dokunun.",
+                        text = errorMessage ?: if (isNesineProvider) {
+                            "Sonuç listesini nesine.com/sportoto/mac-sonuclari üzerinden yenilemek için aşağıdaki butona dokunun."
+                        } else {
+                            "Geçen haftanın sonuçlarını bilyoner.com/spor-toto/sonuclar üzerinden yenilemek için aşağıdaki butona dokunun."
+                        },
                         color = if (errorMessage != null) Color(0xFFFFB4A9) else TextSecondary,
                         fontSize = 13.sp,
                         lineHeight = 19.sp
@@ -429,6 +442,7 @@ internal fun PreviousWeekBulletinDialog(
             }
         },
         confirmButton = {
+            val isNesineProvider = providerLabel.contains("Nesine", ignoreCase = true)
             Button(
                 onClick = onRefresh,
                 enabled = !isLoading,
@@ -436,7 +450,7 @@ internal fun PreviousWeekBulletinDialog(
                 modifier = Modifier.heightIn(min = 48.dp)
             ) {
                 Text(
-                    text = if (isLoading) "Çekiliyor..." else "↻ ESPN'den Yenile",
+                    text = if (isLoading) "Çekiliyor..." else if (isNesineProvider) "↻ Nesine'den Yenile" else "↻ Bilyoner'den Yenile",
                     color = Color.Black,
                     fontWeight = FontWeight.Black,
                     fontSize = 12.sp
